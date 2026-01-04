@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
@@ -10,6 +11,9 @@ DATA_DIR = Path("data")
 STATE_PATH = DATA_DIR / "state.json"
 HISTORY_PATH = DATA_DIR / "history.jsonl"
 SUMMARY_PATH = DATA_DIR / "summary.md"
+
+# Keep only Rome keys for the canonical "return until" version
+KEEP_REGEX = re.compile(r"^GRU-(FCO|CIA)-.*-RL2026-10-05-.*$")
 
 
 def _read_json(path: Path) -> Dict[str, Any]:
@@ -23,7 +27,7 @@ def _read_history_last(n: int = 2) -> List[Dict[str, Any]]:
         return []
     lines = HISTORY_PATH.read_text(encoding="utf-8").splitlines()
     tail = lines[-n:] if len(lines) >= n else lines
-    out = []
+    out: List[Dict[str, Any]] = []
     for line in tail:
         line = line.strip()
         if not line:
@@ -57,42 +61,69 @@ def _extract_best_from_results(results: List[Dict[str, Any]]) -> Dict[str, Dict[
     return best
 
 
+def _infer_destination(r: Dict[str, Any]) -> str:
+    dest = str(r.get("destination", "") or "")
+    if dest:
+        return dest
+    s = str(r.get("summary", "") or "")
+    if "→FCO" in s:
+        return "FCO"
+    if "→CIA" in s:
+        return "CIA"
+    return "ROM"
+
+
 def _pick_best_rome(curr_results: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
-    """
-    Choose best among Rome destinations (FCO/CIA), preferring valid numeric prices.
-    """
-    candidates = []
+    candidates: List[Tuple[float, Dict[str, Any]]] = []
     for r in curr_results or []:
-        dest = str(r.get("destination", "") or "")
+        dest = _infer_destination(r)
         if dest not in ("FCO", "CIA"):
-            # fallback: sometimes destination not present; infer from summary
-            s = str(r.get("summary", "") or "")
-            if "→FCO" not in s and "→CIA" not in s:
-                continue
+            continue
         try:
             p = float(r.get("price", float("inf")))
         except Exception:
             p = float("inf")
         candidates.append((p, r))
+
     if not candidates:
         return None
+
     candidates.sort(key=lambda x: x[0])
-    best_price, best_r = candidates[0]
-    if best_price == float("inf"):
-        return best_r  # will render as N/A
-    return best_r
+    return candidates[0][1]
+
+
+def _render_carrier_table(md: List[str], by_carrier: Any, currency: str) -> None:
+    if not isinstance(by_carrier, dict) or not by_carrier:
+        md.append("_No airline split available for this run._")
+        return
+
+    rows: List[Tuple[str, float]] = []
+    for c, v in by_carrier.items():
+        try:
+            p = float(v)
+        except Exception:
+            continue
+        rows.append((str(c), p))
+
+    if not rows:
+        md.append("_No airline split available for this run._")
+        return
+
+    rows.sort(key=lambda x: x[1])
+
+    md.append("| Airline (carrier code) | Best Price |")
+    md.append("|---|---:|")
+    for c, p in rows[:5]:
+        md.append(f"| `{c}` | {_fmt_money(p, currency)} |")
 
 
 def main() -> int:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
 
     state = _read_json(STATE_PATH)
-    import re
-    KEEP_REGEX = re.compile(r"^GRU-(FCO|CIA)-.*-RL2026-10-05-.*$")
-    
     best_map: Dict[str, Any] = state.get("best", {}) if isinstance(state.get("best", {}), dict) else {}
+    # Shield summary from legacy keys
     best_map = {k: v for k, v in best_map.items() if KEEP_REGEX.match(k)}
-
 
     history = _read_history_last(2)
     curr_run = history[-1] if len(history) >= 1 else None
@@ -101,8 +132,12 @@ def main() -> int:
     curr_results = curr_run.get("results", []) if curr_run else []
     prev_results = prev_run.get("results", []) if prev_run else []
 
-    curr_best = _extract_best_from_results(curr_results)
-    prev_best = _extract_best_from_results(prev_results)
+    # Filter Rome-only in snapshots as well
+    curr_results_filtered = [r for r in curr_results if KEEP_REGEX.match(str(r.get("key", "")))]
+    prev_results_filtered = [r for r in prev_results if KEEP_REGEX.match(str(r.get("key", "")))]
+
+    curr_best = _extract_best_from_results(curr_results_filtered)
+    prev_best = _extract_best_from_results(prev_results_filtered)
 
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 
@@ -116,39 +151,35 @@ def main() -> int:
         md.append(f"- Previous run_id: `{prev_run.get('run_id','')}`")
     md.append("")
 
-    # Headline: best Rome
-    best_rome = _pick_best_rome(curr_results)
+    # Headline: best Rome (FCO/CIA)
     md.append("## Headline — São Paulo → Roma (FCO/CIA)")
     md.append("")
+    best_rome = _pick_best_rome(curr_results_filtered)
     if not best_rome:
         md.append("_No Rome results found in latest run._")
+        md.append("")
     else:
-        currency = str(best_rome.get("currency", ""))
+        currency = str(best_rome.get("currency", "") or "BRL")
         try:
             p = float(best_rome.get("price", float("inf")))
         except Exception:
             p = float("inf")
 
         origin = str(best_rome.get("origin", "GRU") or "GRU")
-        dest = str(best_rome.get("destination", "") or "")
-        # try infer destination if missing
-        if not dest:
-            s = str(best_rome.get("summary", "") or "")
-            if "→FCO" in s:
-                dest = "FCO"
-            elif "→CIA" in s:
-                dest = "CIA"
-            else:
-                dest = "ROM"
+        dest = _infer_destination(best_rome)
 
         dep = str(best_rome.get("best_dep", "") or "")
         ret = str(best_rome.get("best_ret", "") or "")
 
         md.append(f"- **Best this run:** {origin}→{dest} — **{_fmt_money(p, currency)}**")
-        if dep or ret:
-            md.append(f"- Dates: depart **{dep or '—'}** · return **{ret or '—'}** (≤ 2026-10-05)")
+        md.append(f"- Dates: depart **{dep or '—'}** · return **{ret or '—'}** (≤ 2026-10-05)")
         md.append(f"- Key: `{best_rome.get('key','')}`")
-    md.append("")
+        md.append("")
+
+        md.append("### Roma — by Airline (Top 5)")
+        md.append("")
+        _render_carrier_table(md, best_rome.get("by_carrier", {}), currency)
+        md.append("")
 
     md.append("## Current Best (from state.json)")
     md.append("")
@@ -169,8 +200,8 @@ def main() -> int:
 
     md.append("## Latest Run — Snapshot")
     md.append("")
-    if not curr_run:
-        md.append("_No run history yet._")
+    if not curr_best:
+        md.append("_No snapshot rows available yet._")
     else:
         md.append("| Route Key | This Run Best | Change vs Prev |")
         md.append("|---|---:|---:|")
@@ -178,11 +209,13 @@ def main() -> int:
             currency = str(r.get("currency", "") or "")
             p_now = float(r.get("price", float("inf")))
             p_prev = float(prev_best.get(key, {}).get("price", float("inf"))) if prev_best else float("inf")
+
             if p_prev == float("inf") or p_now == float("inf"):
                 delta = "N/A"
             else:
                 delta_val = p_now - p_prev
                 delta = f"{currency} {delta_val:,.2f}" if currency else f"{delta_val:,.2f}"
+
             md.append(f"| `{key}` | {_fmt_money(p_now, currency)} | {delta} |")
 
     md.append("")
