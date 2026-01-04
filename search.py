@@ -1,4 +1,3 @@
-# search.py (Amadeus real + return until)
 from __future__ import annotations
 
 import os
@@ -8,7 +7,6 @@ from datetime import date, datetime
 from typing import Any, Dict, List, Optional
 
 import requests
-
 
 AMADEUS_TEST_BASE = "https://test.api.amadeus.com"
 AMADEUS_PROD_BASE = "https://api.amadeus.com"
@@ -31,7 +29,7 @@ def _add_days(d: date, days: int) -> date:
 
 def _daterange(start: date, end: date, step_days: int) -> List[date]:
     step_days = max(1, int(step_days))
-    out = []
+    out: List[date] = []
     cur = start
     while cur <= end:
         out.append(cur)
@@ -45,14 +43,13 @@ def _stable_key(route: dict[str, Any]) -> str:
     dep = route.get("departure_window", {}) or {}
     dep_from = str(dep.get("from", ""))
     dep_to = str(dep.get("to", ""))
-
-    return_latest = str(route.get("return_latest", ""))  # limit
+    return_latest = str(route.get("return_latest", ""))
     cabin = str(route.get("cabin", "ECONOMY") or "ECONOMY").upper()
     adults = int(route.get("adults", 1) or 1)
     children = int(route.get("children", 0) or 0)
     currency = str(route.get("currency", "") or "")
 
-    raw = f"{origin}-{dest}|{dep_from}:{dep_to}|return<= {return_latest}|{cabin}|A{adults}|C{children}|{currency}"
+    raw = f"{origin}-{dest}|{dep_from}:{dep_to}|return<={return_latest}|{cabin}|A{adults}|C{children}|{currency}"
     h = hashlib.sha1(raw.encode("utf-8")).hexdigest()[:10]
     return f"{origin}-{dest}-{dep_from}-{dep_to}-RL{return_latest}-{cabin}-A{adults}-C{children}-{currency}-{h}"
 
@@ -91,13 +88,14 @@ class AmadeusClient:
         url = f"{self.base}/v2/shopping/flight-offers"
         headers = {"Authorization": f"Bearer {token}"}
 
-        # retry com backoff para 429/5xx
         backoff = 1.0
-        for attempt in range(1, 6):  # até 5 tentativas
+        last_resp: Optional[requests.Response] = None
+
+        for _attempt in range(1, 6):
             r = requests.get(url, params=params, headers=headers, timeout=45)
+            last_resp = r
 
             if r.status_code == 429:
-                # tenta respeitar Retry-After se existir
                 ra = r.headers.get("Retry-After")
                 wait = float(ra) if ra and ra.isdigit() else backoff
                 time.sleep(wait)
@@ -112,15 +110,15 @@ class AmadeusClient:
             r.raise_for_status()
             return r.json()
 
-        # se estourou tentativas, levanta erro com contexto
-        r.raise_for_status()
-        return r.json()
+        # if still failing, raise with last response
+        if last_resp is not None:
+            last_resp.raise_for_status()
+        raise RuntimeError("Amadeus request failed after retries")
+
 
 def _min_price_from_offers(payload: Dict[str, Any]) -> Optional[float]:
-    data = payload.get("data", [])
-    if not data:
-        return None
-    best = None
+    data = payload.get("data", []) or []
+    best: Optional[float] = None
     for offer in data:
         total = offer.get("price", {}).get("total")
         if total is None:
@@ -132,13 +130,13 @@ def _min_price_from_offers(payload: Dict[str, Any]) -> Optional[float]:
         best = p if best is None else min(best, p)
     return best
 
+
 def _min_price_by_carrier(payload: Dict[str, Any]) -> Dict[str, float]:
     """
-    Returns a dict: { "AZ": 10742.30, "TP": 10210.00, ... }
-    Uses validatingAirlineCodes if present; fallback to first segment carrierCode.
+    Best price per airline (carrier code), using validatingAirlineCodes when available.
     """
     data = payload.get("data", []) or []
-    best: Dict[str, float] = {}
+    out: Dict[str, float] = {}
 
     for offer in data:
         total = offer.get("price", {}).get("total")
@@ -150,13 +148,10 @@ def _min_price_by_carrier(payload: Dict[str, Any]) -> Dict[str, float]:
             continue
 
         carriers: List[str] = []
-
-        # Prefer validating airlines (most consistent)
         vac = offer.get("validatingAirlineCodes")
         if isinstance(vac, list) and vac:
             carriers = [str(c) for c in vac if c]
         else:
-            # Fallback: first segment marketing carrier
             itins = offer.get("itineraries", []) or []
             if itins:
                 segs = itins[0].get("segments", []) or []
@@ -165,15 +160,12 @@ def _min_price_by_carrier(payload: Dict[str, Any]) -> Dict[str, float]:
                     if cc:
                         carriers = [str(cc)]
 
-        if not carriers:
-            continue
-
-        # offer may have more than one validating carrier; count each
         for c in carriers:
-            if c not in best or price < best[c]:
-                best[c] = price
+            if c not in out or price < out[c]:
+                out[c] = price
 
-    return best
+    return out
+
 
 def run_search(profile: dict[str, Any]) -> list[dict[str, Any]]:
     routes = profile.get("routes", [])
@@ -190,12 +182,12 @@ def run_search(profile: dict[str, Any]) -> list[dict[str, Any]]:
         dep = route.get("departure_window", {}) or {}
         dep_from = _parse_date(dep["from"])
         dep_to = _parse_date(dep["to"])
-        dep_step = int(route.get("departure_step_days", 3) or 3)
+        dep_step = int(route.get("departure_step_days", 7) or 7)
 
         return_latest = _parse_date(str(route["return_latest"]))
-        return_offsets = route.get("return_offsets_days", [7, 14])
+        return_offsets = route.get("return_offsets_days", [10])
         if not isinstance(return_offsets, list) or not return_offsets:
-            return_offsets = [7, 14]
+            return_offsets = [10]
 
         cabin = str(route.get("cabin", "ECONOMY")).upper()
         adults = int(route.get("adults", 1) or 1)
@@ -205,9 +197,9 @@ def run_search(profile: dict[str, Any]) -> list[dict[str, Any]]:
         best_price: Optional[float] = None
         best_dep: Optional[str] = None
         best_ret: Optional[str] = None
+        best_by_carrier: Dict[str, float] = {}
 
         for d in _daterange(dep_from, dep_to, step_days=dep_step):
-            # monta candidatos de volta: d+offsets (capado no limite) + o próprio limite
             candidates: List[date] = []
             for off in return_offsets:
                 try:
@@ -218,12 +210,9 @@ def run_search(profile: dict[str, Any]) -> list[dict[str, Any]]:
                 if ret <= return_latest:
                     candidates.append(ret)
             candidates.append(return_latest)
-
-            # remove duplicadas e ordena
             candidates = sorted({c for c in candidates})
 
             for ret_d in candidates:
-                # segurança: volta sempre depois da ida
                 if ret_d <= d:
                     continue
 
@@ -236,25 +225,38 @@ def run_search(profile: dict[str, Any]) -> list[dict[str, Any]]:
                     "children": children,
                     "travelClass": cabin,
                     "currencyCode": currency,
-                    "max": 20,
+                    "max": 10,
                 }
 
                 payload = client.flight_offers_search(params)
+
                 p = _min_price_from_offers(payload)
                 if p is not None and (best_price is None or p < best_price):
                     best_price = p
                     best_dep = d.isoformat()
                     best_ret = ret_d.isoformat()
 
+                # merge per-carrier minima (no extra requests)
+                byc = _min_price_by_carrier(payload)
+                for c, price in byc.items():
+                    if c not in best_by_carrier or price < best_by_carrier[c]:
+                        best_by_carrier[c] = price
+
                 time.sleep(0.12)
 
         key = _stable_key(route)
+
         if best_price is None:
             results.append(
                 {
                     "key": key,
                     "price": float("inf"),
                     "currency": currency,
+                    "origin": origin,
+                    "destination": destination,
+                    "best_dep": None,
+                    "best_ret": None,
+                    "by_carrier": {},
                     "summary": f"{origin}→{destination} no offers found dep={dep_from}..{dep_to} return<= {return_latest}",
                     "deeplink": "",
                 }
@@ -265,13 +267,14 @@ def run_search(profile: dict[str, Any]) -> list[dict[str, Any]]:
                     "key": key,
                     "price": float(best_price),
                     "currency": currency,
-                    "best_dep": best_dep,
-                    "best_ret": best_ret,
                     "origin": origin,
                     "destination": destination,
+                    "best_dep": best_dep,
+                    "best_ret": best_ret,
                     "cabin": cabin,
                     "adults": adults,
                     "children": children,
+                    "by_carrier": best_by_carrier,
                     "summary": f"{origin}→{destination} best_dep={best_dep} best_ret={best_ret} cabin={cabin} A={adults} C={children}",
                     "deeplink": "",
                 }
