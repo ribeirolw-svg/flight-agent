@@ -223,6 +223,13 @@ def run_search(profile: dict[str, Any]) -> list[dict[str, Any]]:
                     "key": key,
                     "price": float(best_price),
                     "currency": currency,
+                    "best_dep": best_dep,
+                    "best_ret": best_ret,
+                    "origin": origin,
+                    "destination": destination,
+                    "cabin": cabin,
+                    "adults": adults,
+                    "children": children,
                     "summary": f"{origin}→{destination} best_dep={best_dep} best_ret={best_ret} cabin={cabin} A={adults} C={children}",
                     "deeplink": "",
                 }
