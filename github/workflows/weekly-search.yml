@@ -1,0 +1,51 @@
+name: Weekly Flight Search
+
+on:
+  schedule:
+    # Toda segunda às 08:00 UTC (05:00 no Brasil -03)
+    # Se quiser, eu ajusto depois pro horário que você preferir.
+    - cron: "0 8 * * 1"
+  workflow_dispatch: {}
+
+jobs:
+  run-search:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run scheduler
+        env:
+          # Amadeus
+          AMADEUS_CLIENT_ID: ${{ secrets.AMADEUS_CLIENT_ID }}
+          AMADEUS_CLIENT_SECRET: ${{ secrets.AMADEUS_CLIENT_SECRET }}
+
+          # Perfil de busca (JSON inteiro em 1 secret)
+          SEARCH_PROFILE_JSON: ${{ secrets.SEARCH_PROFILE_JSON }}
+
+          # Alertas
+          ALERT_DROP_PCT: "0.10"
+
+          # Notificação (exemplos — você escolhe qual usar)
+          NOTIFY_EMAIL_TO: ${{ secrets.NOTIFY_EMAIL_TO }}
+          SMTP_HOST: ${{ secrets.SMTP_HOST }}
+          SMTP_PORT: ${{ secrets.SMTP_PORT }}
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASS: ${{ secrets.SMTP_PASS }}
+
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+
+        run: |
+          python backend/scheduler.py
