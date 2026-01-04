@@ -4,12 +4,12 @@
       "origin": "GRU",
       "destination": "FCO",
       "departure_window": { "from": "2026-09-01", "to": "2026-10-05" },
-      "return_by": "2026-10-05",
+      "return_date": "2026-10-05",
+      "departure_step_days": 2,
       "cabin": "ECONOMY",
       "adults": 2,
       "children": 1,
-      "currency": "BRL",
-      "notes": "Sao Paulo -> Roma. Regra de ouro: volta ate 05/10/2026"
+      "currency": "BRL"
     }
   ]
 }
