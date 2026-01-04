@@ -1,8 +1,14 @@
 # Flight Agent — Weekly Summary
 
-- Updated: **2026-01-04 20:24 UTC**
-- Latest run_id: `20260104T202252Z`
-- Previous run_id: `20260104T201619Z`
+- Updated: **2026-01-04 20:37 UTC**
+- Latest run_id: `20260104T203611Z`
+- Previous run_id: `20260104T202252Z`
+
+## Headline — São Paulo → Roma (FCO/CIA)
+
+- **Best this run:** GRU→FCO — **BRL 10,742.30**
+- Dates: depart **2026-09-01** · return **2026-09-11** (≤ 2026-10-05)
+- Key: `GRU-FCO-2026-09-01-2026-10-05-RL2026-10-05-ECONOMY-A2-C1-BRL-99f573235a`
 
 ## Current Best (from state.json)
 
