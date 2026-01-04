@@ -1,26 +1,5 @@
 {
   "best": {
-    "GRU-JFK-2026-09-01-2026-09-30-2026-10-15-ECONOMY-A1-9e44fc7c94": {
-      "price": 4569.0,
-      "currency": "BRL",
-      "run_id": "20260104T190209Z",
-      "ts_utc": "2026-01-04T19:02:09.953863+00:00",
-      "summary": "GRU→JFK 2026-09-01..2026-09-30 return_by=2026-10-15 cabin=ECONOMY"
-    },
-    "GRU-FCO-2026-09-01-2026-10-05-2026-10-05-ECONOMY-A2-C1-eac7a5f3e4": {
-      "price": 3592.0,
-      "currency": "BRL",
-      "run_id": "20260104T194832Z",
-      "ts_utc": "2026-01-04T19:48:32.791681+00:00",
-      "summary": "GRU→FCO 2026-09-01..2026-10-05 return_by=2026-10-05 cabin=ECONOMY adults=2 children=1"
-    },
-    "GRU-FCO-2026-09-01-2026-10-05-R2026-10-05-ECONOMY-A2-C1-BRL-7b3ec373a7": {
-      "price": 12404.85,
-      "currency": "BRL",
-      "run_id": "20260104T195327Z",
-      "ts_utc": "2026-01-04T19:55:27.826430+00:00",
-      "summary": "GRU→FCO best_dep=2026-09-15 return=2026-10-05 cabin=ECONOMY adults=2 children=1"
-    },
     "GRU-FCO-2026-09-01-2026-10-05-RL2026-10-05-ECONOMY-A2-C1-BRL-99f573235a": {
       "price": 10742.3,
       "currency": "BRL",
