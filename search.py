@@ -19,8 +19,9 @@ def _stable_key(route: dict[str, Any]) -> str:
     return_by = route.get("return_by", "")
     cabin = (route.get("cabin", "ECONOMY") or "ECONOMY").upper()
     adults = int(route.get("adults", 1) or 1)
+    children = int(route.get("children", 0) or 0)
 
-    raw = f"{origin}-{dest}|{dep_from}:{dep_to}|return_by:{return_by}|{cabin}|adults:{adults}"
+    raw = f"{origin}-{dest}|{dep_from}:{dep_to}|return_by:{return_by}|{cabin}|adults:{adults}|children:{children}"
     # compact hash to avoid huge keys
     h = hashlib.sha1(raw.encode("utf-8")).hexdigest()[:10]
     return f"{origin}-{dest}-{dep_from}-{dep_to}-{return_by}-{cabin}-A{adults}-{h}"
@@ -70,7 +71,7 @@ def run_search(profile: dict[str, Any]) -> list[dict[str, Any]]:
                 "currency": r.get("currency", "BRL"),
                 "summary": f"{r.get('origin','').upper()}→{r.get('destination','').upper()} "
                            f"{r.get('departure_window',{}).get('from','')}..{r.get('departure_window',{}).get('to','')} "
-                           f"return_by={r.get('return_by','')} cabin={r.get('cabin','ECONOMY')}",
+                           f"return_by={r.get('return_by','')} cabin={r.get('cabin','ECONOMY')}, adults={r.get('adults',1)} children={r.get('children',0)} "
                 "deeplink": "",
             }
         )
