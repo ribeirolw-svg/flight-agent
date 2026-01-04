@@ -90,10 +90,31 @@ class AmadeusClient:
         token = self._get_token()
         url = f"{self.base}/v2/shopping/flight-offers"
         headers = {"Authorization": f"Bearer {token}"}
-        r = requests.get(url, params=params, headers=headers, timeout=45)
+
+        # retry com backoff para 429/5xx
+        backoff = 1.0
+        for attempt in range(1, 6):  # até 5 tentativas
+            r = requests.get(url, params=params, headers=headers, timeout=45)
+
+            if r.status_code == 429:
+                # tenta respeitar Retry-After se existir
+                ra = r.headers.get("Retry-After")
+                wait = float(ra) if ra and ra.isdigit() else backoff
+                time.sleep(wait)
+                backoff = min(backoff * 2, 16.0)
+                continue
+
+            if 500 <= r.status_code <= 599:
+                time.sleep(backoff)
+                backoff = min(backoff * 2, 16.0)
+                continue
+
+            r.raise_for_status()
+            return r.json()
+
+        # se estourou tentativas, levanta erro com contexto
         r.raise_for_status()
         return r.json()
-
 
 def _min_price_from_offers(payload: Dict[str, Any]) -> Optional[float]:
     data = payload.get("data", [])
