@@ -1,8 +1,8 @@
 # Flight Agent — Weekly Summary
 
-- Updated: **2026-01-04 20:37 UTC**
-- Latest run_id: `20260104T203611Z`
-- Previous run_id: `20260104T202252Z`
+- Updated: **2026-01-04 20:41 UTC**
+- Latest run_id: `20260104T204106Z`
+- Previous run_id: `20260104T203611Z`
 
 ## Headline — São Paulo → Roma (FCO/CIA)
 
