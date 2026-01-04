@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 DATA_DIR = Path("data")
 STATE_PATH = DATA_DIR / "state.json"
@@ -42,7 +42,6 @@ def _fmt_money(price: float, currency: str) -> str:
 
 
 def _extract_best_from_results(results: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
-    # Map key -> best result (min price) inside one run
     best: Dict[str, Dict[str, Any]] = {}
     for r in results or []:
         key = r.get("key")
@@ -58,6 +57,32 @@ def _extract_best_from_results(results: List[Dict[str, Any]]) -> Dict[str, Dict[
     return best
 
 
+def _pick_best_rome(curr_results: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """
+    Choose best among Rome destinations (FCO/CIA), preferring valid numeric prices.
+    """
+    candidates = []
+    for r in curr_results or []:
+        dest = str(r.get("destination", "") or "")
+        if dest not in ("FCO", "CIA"):
+            # fallback: sometimes destination not present; infer from summary
+            s = str(r.get("summary", "") or "")
+            if "→FCO" not in s and "→CIA" not in s:
+                continue
+        try:
+            p = float(r.get("price", float("inf")))
+        except Exception:
+            p = float("inf")
+        candidates.append((p, r))
+    if not candidates:
+        return None
+    candidates.sort(key=lambda x: x[0])
+    best_price, best_r = candidates[0]
+    if best_price == float("inf"):
+        return best_r  # will render as N/A
+    return best_r
+
+
 def main() -> int:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -68,12 +93,15 @@ def main() -> int:
     curr_run = history[-1] if len(history) >= 1 else None
     prev_run = history[-2] if len(history) >= 2 else None
 
-    curr_best = _extract_best_from_results(curr_run.get("results", []) if curr_run else [])
-    prev_best = _extract_best_from_results(prev_run.get("results", []) if prev_run else [])
+    curr_results = curr_run.get("results", []) if curr_run else []
+    prev_results = prev_run.get("results", []) if prev_run else []
+
+    curr_best = _extract_best_from_results(curr_results)
+    prev_best = _extract_best_from_results(prev_results)
 
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 
-    md = []
+    md: List[str] = []
     md.append("# Flight Agent — Weekly Summary")
     md.append("")
     md.append(f"- Updated: **{now}**")
@@ -81,6 +109,40 @@ def main() -> int:
         md.append(f"- Latest run_id: `{curr_run.get('run_id','')}`")
     if prev_run:
         md.append(f"- Previous run_id: `{prev_run.get('run_id','')}`")
+    md.append("")
+
+    # Headline: best Rome
+    best_rome = _pick_best_rome(curr_results)
+    md.append("## Headline — São Paulo → Roma (FCO/CIA)")
+    md.append("")
+    if not best_rome:
+        md.append("_No Rome results found in latest run._")
+    else:
+        currency = str(best_rome.get("currency", ""))
+        try:
+            p = float(best_rome.get("price", float("inf")))
+        except Exception:
+            p = float("inf")
+
+        origin = str(best_rome.get("origin", "GRU") or "GRU")
+        dest = str(best_rome.get("destination", "") or "")
+        # try infer destination if missing
+        if not dest:
+            s = str(best_rome.get("summary", "") or "")
+            if "→FCO" in s:
+                dest = "FCO"
+            elif "→CIA" in s:
+                dest = "CIA"
+            else:
+                dest = "ROM"
+
+        dep = str(best_rome.get("best_dep", "") or "")
+        ret = str(best_rome.get("best_ret", "") or "")
+
+        md.append(f"- **Best this run:** {origin}→{dest} — **{_fmt_money(p, currency)}**")
+        if dep or ret:
+            md.append(f"- Dates: depart **{dep or '—'}** · return **{ret or '—'}** (≤ 2026-10-05)")
+        md.append(f"- Key: `{best_rome.get('key','')}`")
     md.append("")
 
     md.append("## Current Best (from state.json)")
@@ -115,9 +177,7 @@ def main() -> int:
                 delta = "N/A"
             else:
                 delta_val = p_now - p_prev
-                delta = f"{delta_val:,.2f}"
-                if currency:
-                    delta = f"{currency} {delta}"
+                delta = f"{currency} {delta_val:,.2f}" if currency else f"{delta_val:,.2f}"
             md.append(f"| `{key}` | {_fmt_money(p_now, currency)} | {delta} |")
 
     md.append("")
