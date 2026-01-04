@@ -1,11 +1,11 @@
-# search.py (REAL - Amadeus)
+# search.py (Amadeus real + return until)
 from __future__ import annotations
 
 import os
 import time
 import hashlib
 from datetime import date, datetime
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 import requests
 
@@ -25,14 +25,17 @@ def _parse_date(s: str) -> date:
     return datetime.strptime(s, "%Y-%m-%d").date()
 
 
+def _add_days(d: date, days: int) -> date:
+    return d.fromordinal(d.toordinal() + days)
+
+
 def _daterange(start: date, end: date, step_days: int) -> List[date]:
-    if step_days < 1:
-        step_days = 1
+    step_days = max(1, int(step_days))
     out = []
     cur = start
     while cur <= end:
         out.append(cur)
-        cur = cur.fromordinal(cur.toordinal() + step_days)
+        cur = _add_days(cur, step_days)
     return out
 
 
@@ -42,15 +45,16 @@ def _stable_key(route: dict[str, Any]) -> str:
     dep = route.get("departure_window", {}) or {}
     dep_from = str(dep.get("from", ""))
     dep_to = str(dep.get("to", ""))
-    return_date = str(route.get("return_date", ""))  # agora é data fixa
+
+    return_latest = str(route.get("return_latest", ""))  # limit
     cabin = str(route.get("cabin", "ECONOMY") or "ECONOMY").upper()
     adults = int(route.get("adults", 1) or 1)
     children = int(route.get("children", 0) or 0)
     currency = str(route.get("currency", "") or "")
 
-    raw = f"{origin}-{dest}|{dep_from}:{dep_to}|return:{return_date}|{cabin}|A{adults}|C{children}|{currency}"
+    raw = f"{origin}-{dest}|{dep_from}:{dep_to}|return<= {return_latest}|{cabin}|A{adults}|C{children}|{currency}"
     h = hashlib.sha1(raw.encode("utf-8")).hexdigest()[:10]
-    return f"{origin}-{dest}-{dep_from}-{dep_to}-R{return_date}-{cabin}-A{adults}-C{children}-{currency}-{h}"
+    return f"{origin}-{dest}-{dep_from}-{dep_to}-RL{return_latest}-{cabin}-A{adults}-C{children}-{currency}-{h}"
 
 
 class AmadeusClient:
@@ -59,9 +63,8 @@ class AmadeusClient:
         self.client_secret = _env("AMADEUS_CLIENT_SECRET")
         env = os.getenv("AMADEUS_ENV", "test").lower().strip()
         self.base = AMADEUS_PROD_BASE if env in ("prod", "production") else AMADEUS_TEST_BASE
-
         self._token: Optional[str] = None
-        self._token_expiry: float = 0.0  # epoch seconds
+        self._token_expiry: float = 0.0
 
     def _get_token(self) -> str:
         now = time.time()
@@ -75,7 +78,6 @@ class AmadeusClient:
             "client_secret": self.client_secret,
         }
         headers = {"Content-Type": "application/x-www-form-urlencoded"}
-
         r = requests.post(url, data=data, headers=headers, timeout=30)
         r.raise_for_status()
         payload = r.json()
@@ -84,33 +86,9 @@ class AmadeusClient:
         self._token_expiry = now + expires_in
         return self._token
 
-    def flight_offers_search(
-        self,
-        origin: str,
-        destination: str,
-        departure_date: str,
-        return_date: str,
-        adults: int,
-        children: int,
-        travel_class: str,
-        currency_code: str,
-        max_results: int = 20,
-    ) -> Dict[str, Any]:
+    def flight_offers_search(self, params: Dict[str, Any]) -> Dict[str, Any]:
         token = self._get_token()
         url = f"{self.base}/v2/shopping/flight-offers"
-
-        params = {
-            "originLocationCode": origin,
-            "destinationLocationCode": destination,
-            "departureDate": departure_date,
-            "returnDate": return_date,
-            "adults": adults,
-            "children": children,
-            "travelClass": travel_class,
-            "currencyCode": currency_code,
-            "max": max_results,
-        }
-
         headers = {"Authorization": f"Bearer {token}"}
         r = requests.get(url, params=params, headers=headers, timeout=45)
         r.raise_for_status()
@@ -121,17 +99,17 @@ def _min_price_from_offers(payload: Dict[str, Any]) -> Optional[float]:
     data = payload.get("data", [])
     if not data:
         return None
-    prices = []
+    best = None
     for offer in data:
-        # total costuma vir como string
         total = offer.get("price", {}).get("total")
         if total is None:
             continue
         try:
-            prices.append(float(total))
+            p = float(total)
         except Exception:
-            pass
-    return min(prices) if prices else None
+            continue
+        best = p if best is None else min(best, p)
+    return best
 
 
 def run_search(profile: dict[str, Any]) -> list[dict[str, Any]]:
@@ -149,9 +127,12 @@ def run_search(profile: dict[str, Any]) -> list[dict[str, Any]]:
         dep = route.get("departure_window", {}) or {}
         dep_from = _parse_date(dep["from"])
         dep_to = _parse_date(dep["to"])
+        dep_step = int(route.get("departure_step_days", 3) or 3)
 
-        return_date = str(route["return_date"])  # data fixa
-        step = int(route.get("departure_step_days", 2) or 2)
+        return_latest = _parse_date(str(route["return_latest"]))
+        return_offsets = route.get("return_offsets_days", [7, 14])
+        if not isinstance(return_offsets, list) or not return_offsets:
+            return_offsets = [7, 14]
 
         cabin = str(route.get("cabin", "ECONOMY")).upper()
         adults = int(route.get("adults", 1) or 1)
@@ -160,43 +141,58 @@ def run_search(profile: dict[str, Any]) -> list[dict[str, Any]]:
 
         best_price: Optional[float] = None
         best_dep: Optional[str] = None
+        best_ret: Optional[str] = None
 
-        # varre as datas de ida (amostrando para poupar quota)
-        for d in _daterange(dep_from, dep_to, step_days=step):
-            dep_date_str = d.isoformat()
-            try:
-                payload = client.flight_offers_search(
-                    origin=origin,
-                    destination=destination,
-                    departure_date=dep_date_str,
-                    return_date=return_date,
-                    adults=adults,
-                    children=children,
-                    travel_class=cabin,
-                    currency_code=currency,
-                    max_results=20,
-                )
+        for d in _daterange(dep_from, dep_to, step_days=dep_step):
+            # monta candidatos de volta: d+offsets (capado no limite) + o próprio limite
+            candidates: List[date] = []
+            for off in return_offsets:
+                try:
+                    off_i = int(off)
+                except Exception:
+                    continue
+                ret = _add_days(d, max(1, off_i))
+                if ret <= return_latest:
+                    candidates.append(ret)
+            candidates.append(return_latest)
+
+            # remove duplicadas e ordena
+            candidates = sorted({c for c in candidates})
+
+            for ret_d in candidates:
+                # segurança: volta sempre depois da ida
+                if ret_d <= d:
+                    continue
+
+                params = {
+                    "originLocationCode": origin,
+                    "destinationLocationCode": destination,
+                    "departureDate": d.isoformat(),
+                    "returnDate": ret_d.isoformat(),
+                    "adults": adults,
+                    "children": children,
+                    "travelClass": cabin,
+                    "currencyCode": currency,
+                    "max": 20,
+                }
+
+                payload = client.flight_offers_search(params)
                 p = _min_price_from_offers(payload)
                 if p is not None and (best_price is None or p < best_price):
                     best_price = p
-                    best_dep = dep_date_str
-            except requests.HTTPError as e:
-                # se estourar quota/429, você vai ver aqui no log do Actions
-                raise RuntimeError(f"Amadeus HTTP error for {origin}-{destination} dep={dep_date_str}: {e}") from e
+                    best_dep = d.isoformat()
+                    best_ret = ret_d.isoformat()
 
-            # respeitar rate limit (bem conservador)
-            time.sleep(0.12)
+                time.sleep(0.12)
 
         key = _stable_key(route)
-
         if best_price is None:
-            # Sem ofertas encontradas (ou rota inválida) — mantém registro pra diagnóstico
             results.append(
                 {
                     "key": key,
                     "price": float("inf"),
                     "currency": currency,
-                    "summary": f"{origin}→{destination} no offers found in {dep_from}..{dep_to} return={return_date}",
+                    "summary": f"{origin}→{destination} no offers found dep={dep_from}..{dep_to} return<= {return_latest}",
                     "deeplink": "",
                 }
             )
@@ -206,10 +202,7 @@ def run_search(profile: dict[str, Any]) -> list[dict[str, Any]]:
                     "key": key,
                     "price": float(best_price),
                     "currency": currency,
-                    "summary": (
-                        f"{origin}→{destination} best_dep={best_dep} return={return_date} "
-                        f"cabin={cabin} adults={adults} children={children}"
-                    ),
+                    "summary": f"{origin}→{destination} best_dep={best_dep} best_ret={best_ret} cabin={cabin} A={adults} C={children}",
                     "deeplink": "",
                 }
             )
