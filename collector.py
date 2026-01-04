@@ -4,6 +4,7 @@ import requests
 import pandas as pd
 from datetime import datetime
 from date_rules import generate_date_pairs
+
 BASE_URL = "https://test.api.amadeus.com"
 TOKEN_URL = f"{BASE_URL}/v1/security/oauth2/token"
 FLIGHT_OFFERS = f"{BASE_URL}/v2/shopping/flight-offers"
@@ -36,9 +37,10 @@ def amadeus_search_offers(token: str, origin: str, destination: str, depart: str
         "adults": adults,
         "children": children,
         "max": str(max_results),
+        "currencyCode": "BRL",
     }
     resp = requests.get(FLIGHT_OFFERS, headers=headers, params=params, timeout=30)
-    if resp.status_code >= 400:
+        if resp.status_code >= 400:
         raise RuntimeError(f"HTTP {resp.status_code}: {resp.text[:300]}")
     return resp.json()
 
@@ -77,7 +79,7 @@ def normalize_direct_offers(data_json, base_row):
             "observacoes": "Direto (filtrado por segmentos)",
         })
 
-    if not rows:
+        if not rows:
         rows.append({
             **base_row,
             "fonte": "amadeus",
