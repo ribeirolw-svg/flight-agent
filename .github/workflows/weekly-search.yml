@@ -29,7 +29,8 @@ jobs:
           AMADEUS_CLIENT_SECRET: ${{ secrets.AMADEUS_CLIENT_SECRET }}
           SEARCH_PROFILE_JSON: ${{ secrets.SEARCH_PROFILE_JSON }}
         run: |
-          python backend/scheduler.py
+          cd backend
+          python scheduler.py
 
       - name: Commit updated state/history (if changed)
         run: |
