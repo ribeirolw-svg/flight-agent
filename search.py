@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import os
 import time
-import hashlib
 from datetime import date, datetime
 from typing import Any, Dict, List, Optional
 
@@ -37,21 +36,56 @@ def _daterange(start: date, end: date, step_days: int) -> List[date]:
     return out
 
 
-def _stable_key(route: dict[str, Any]) -> str:
+def _norm_offsets(offsets: Any) -> List[int]:
+    if not isinstance(offsets, list) or not offsets:
+        return [10]
+    out: List[int] = []
+    for x in offsets:
+        try:
+            out.append(int(x))
+        except Exception:
+            continue
+    out = [o for o in out if o > 0]
+    return out or [10]
+
+
+def _stable_key_no_hash(route: dict[str, Any]) -> str:
+    """
+    Deterministic key WITHOUT hashing.
+    Only changes when the profile changes.
+    """
     origin = str(route.get("origin", "")).upper()
     dest = str(route.get("destination", "")).upper()
+
     dep = route.get("departure_window", {}) or {}
     dep_from = str(dep.get("from", ""))
     dep_to = str(dep.get("to", ""))
-    return_latest = str(route.get("return_latest", ""))
+
+    return_latest = str(route.get("return_latest", ""))  # limit
     cabin = str(route.get("cabin", "ECONOMY") or "ECONOMY").upper()
+
     adults = int(route.get("adults", 1) or 1)
     children = int(route.get("children", 0) or 0)
-    currency = str(route.get("currency", "") or "")
 
-    raw = f"{origin}-{dest}|{dep_from}:{dep_to}|return<={return_latest}|{cabin}|A{adults}|C{children}|{currency}"
-    h = hashlib.sha1(raw.encode("utf-8")).hexdigest()[:10]
-    return f"{origin}-{dest}-{dep_from}-{dep_to}-RL{return_latest}-{cabin}-A{adults}-C{children}-{currency}-{h}"
+    currency = str(route.get("currency", "BRL") or "BRL").upper()
+    dep_step = int(route.get("departure_step_days", 7) or 7)
+
+    offsets = _norm_offsets(route.get("return_offsets_days", [10]))
+    offsets_str = ",".join(str(o) for o in offsets)
+
+    # Keep it readable + stable:
+    # GRU-FCO|dep=2026-09-01..2026-10-05|ret<=2026-10-05|class=ECONOMY|A2|C1|BRL|depStep=7|retOff=10
+    return (
+        f"{origin}-{dest}"
+        f"|dep={dep_from}..{dep_to}"
+        f"|ret<={return_latest}"
+        f"|class={cabin}"
+        f"|A{adults}"
+        f"|C{children}"
+        f"|{currency}"
+        f"|depStep={dep_step}"
+        f"|retOff={offsets_str}"
+    )
 
 
 class AmadeusClient:
@@ -110,7 +144,6 @@ class AmadeusClient:
             r.raise_for_status()
             return r.json()
 
-        # if still failing, raise with last response
         if last_resp is not None:
             last_resp.raise_for_status()
         raise RuntimeError("Amadeus request failed after retries")
@@ -133,7 +166,7 @@ def _min_price_from_offers(payload: Dict[str, Any]) -> Optional[float]:
 
 def _min_price_by_carrier(payload: Dict[str, Any]) -> Dict[str, float]:
     """
-    Best price per airline (carrier code), using validatingAirlineCodes when available.
+    Best price per airline code, using validatingAirlineCodes when available.
     """
     data = payload.get("data", []) or []
     out: Dict[str, float] = {}
@@ -182,12 +215,11 @@ def run_search(profile: dict[str, Any]) -> list[dict[str, Any]]:
         dep = route.get("departure_window", {}) or {}
         dep_from = _parse_date(dep["from"])
         dep_to = _parse_date(dep["to"])
+
         dep_step = int(route.get("departure_step_days", 7) or 7)
 
         return_latest = _parse_date(str(route["return_latest"]))
-        return_offsets = route.get("return_offsets_days", [10])
-        if not isinstance(return_offsets, list) or not return_offsets:
-            return_offsets = [10]
+        return_offsets = _norm_offsets(route.get("return_offsets_days", [10]))
 
         cabin = str(route.get("cabin", "ECONOMY")).upper()
         adults = int(route.get("adults", 1) or 1)
@@ -200,13 +232,10 @@ def run_search(profile: dict[str, Any]) -> list[dict[str, Any]]:
         best_by_carrier: Dict[str, float] = {}
 
         for d in _daterange(dep_from, dep_to, step_days=dep_step):
+            # return candidates: d+offsets (<= limit) + the limit itself
             candidates: List[date] = []
             for off in return_offsets:
-                try:
-                    off_i = int(off)
-                except Exception:
-                    continue
-                ret = _add_days(d, max(1, off_i))
+                ret = _add_days(d, off)
                 if ret <= return_latest:
                     candidates.append(ret)
             candidates.append(return_latest)
@@ -236,15 +265,15 @@ def run_search(profile: dict[str, Any]) -> list[dict[str, Any]]:
                     best_dep = d.isoformat()
                     best_ret = ret_d.isoformat()
 
-                # merge per-carrier minima (no extra requests)
                 byc = _min_price_by_carrier(payload)
                 for c, price in byc.items():
                     if c not in best_by_carrier or price < best_by_carrier[c]:
                         best_by_carrier[c] = price
 
+                # conservative pacing
                 time.sleep(0.12)
 
-        key = _stable_key(route)
+        key = _stable_key_no_hash(route)
 
         if best_price is None:
             results.append(
