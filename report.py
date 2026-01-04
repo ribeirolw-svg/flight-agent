@@ -65,7 +65,6 @@ def _fmt_money(price: float, currency: str) -> str:
 
 
 def _md_table_escape(s: str) -> str:
-    # Avoid breaking markdown tables (keys contain "|")
     return (s or "").replace("|", "\\|").replace("\n", " ")
 
 
@@ -152,12 +151,19 @@ def _render_carrier_table(md: List[str], by_carrier: Any, currency: str) -> None
         md.append(f"| `{_md_table_escape(_airline_label(c))}` | {_fmt_money(p, currency)} |")
 
 
+def _find_result_for_dest(results: List[Dict[str, Any]], dest: str) -> Optional[Dict[str, Any]]:
+    dest = dest.upper().strip()
+    for r in results or []:
+        if _infer_destination(r) == dest:
+            return r
+    return None
+
+
 def main() -> int:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
 
     state = _read_json(STATE_PATH)
     best_map: Dict[str, Any] = state.get("best", {}) if isinstance(state.get("best", {}), dict) else {}
-    # Shield summary from legacy keys
     best_map = {k: v for k, v in best_map.items() if KEEP_REGEX.match(k)}
 
     history = _read_history_last(2)
@@ -185,7 +191,7 @@ def main() -> int:
         md.append(f"- Previous run_id: `{prev_run.get('run_id','')}`")
     md.append("")
 
-    # Headline: best Rome (FCO/CIA)
+    # Headline — best overall Rome
     md.append("## Headline — São Paulo → Roma (FCO/CIA)")
     md.append("")
     best_rome = _pick_best_rome(curr_results_filtered)
@@ -213,6 +219,33 @@ def main() -> int:
         md.append("### Roma — by Airline (Top 5)")
         md.append("")
         _render_carrier_table(md, best_rome.get("by_carrier", {}), currency)
+        md.append("")
+
+    # Per-destination tables
+    md.append("## Per Destination — Airline Split")
+    md.append("")
+    for dest in ("FCO", "CIA"):
+        r = _find_result_for_dest(curr_results_filtered, dest)
+        md.append(f"### {dest} — by Airline (Top 5)")
+        md.append("")
+        if not r:
+            md.append("_No result for this destination in latest run._")
+            md.append("")
+            continue
+
+        currency = str(r.get("currency", "") or "BRL")
+        try:
+            p = float(r.get("price", float("inf")))
+        except Exception:
+            p = float("inf")
+
+        dep = str(r.get("best_dep", "") or "")
+        ret = str(r.get("best_ret", "") or "")
+
+        md.append(f"- Best {dest} this run: **{_fmt_money(p, currency)}**")
+        md.append(f"- Dates: depart **{dep or '—'}** · return **{ret or '—'}** (≤ 2026-10-05)")
+        md.append("")
+        _render_carrier_table(md, r.get("by_carrier", {}), currency)
         md.append("")
 
     # Current Best
