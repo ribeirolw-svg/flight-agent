@@ -4,8 +4,6 @@ import requests
 import pandas as pd
 from datetime import datetime
 from date_rules import generate_date_pairs
-
-# Dica: se você estiver em produção, troque para https://api.amadeus.com
 BASE_URL = "https://test.api.amadeus.com"
 TOKEN_URL = f"{BASE_URL}/v1/security/oauth2/token"
 FLIGHT_OFFERS = f"{BASE_URL}/v2/shopping/flight-offers"
@@ -37,13 +35,9 @@ def amadeus_search_offers(token: str, origin: str, destination: str, depart: str
         "returnDate": ret,
         "adults": adults,
         "children": children,
-        # IMPORTANTÍSSIMO: NÃO usar nonStop aqui. Vamos filtrar nós mesmos.
         "max": str(max_results),
-        # Se quiser “como vier”, deixe sem currencyCode.
-        # "currencyCode": "BRL",
     }
     resp = requests.get(FLIGHT_OFFERS, headers=headers, params=params, timeout=30)
-    # Se der erro, queremos ver o corpo (pra diagnóstico)
     if resp.status_code >= 400:
         raise RuntimeError(f"HTTP {resp.status_code}: {resp.text[:300]}")
     return resp.json()
@@ -83,7 +77,6 @@ def normalize_direct_offers(data_json, base_row):
             "observacoes": "Direto (filtrado por segmentos)",
         })
 
-    # Se não achou direto, devolve linha explicativa (não é “erro”, é resultado)
     if not rows:
         rows.append({
             **base_row,
@@ -151,7 +144,6 @@ def collect():
 
     df = pd.DataFrame(rows)
 
-    # Ordena por menor preço quando houver
     if "preco_total" in df.columns:
         df["_preco_num"] = pd.to_numeric(df["preco_total"], errors="coerce")
         df = df.sort_values(["_preco_num", "ida"], ascending=[True, True]).drop(columns=["_preco_num"])
