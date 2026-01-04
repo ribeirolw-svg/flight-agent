@@ -132,6 +132,48 @@ def _min_price_from_offers(payload: Dict[str, Any]) -> Optional[float]:
         best = p if best is None else min(best, p)
     return best
 
+def _min_price_by_carrier(payload: Dict[str, Any]) -> Dict[str, float]:
+    """
+    Returns a dict: { "AZ": 10742.30, "TP": 10210.00, ... }
+    Uses validatingAirlineCodes if present; fallback to first segment carrierCode.
+    """
+    data = payload.get("data", []) or []
+    best: Dict[str, float] = {}
+
+    for offer in data:
+        total = offer.get("price", {}).get("total")
+        if total is None:
+            continue
+        try:
+            price = float(total)
+        except Exception:
+            continue
+
+        carriers: List[str] = []
+
+        # Prefer validating airlines (most consistent)
+        vac = offer.get("validatingAirlineCodes")
+        if isinstance(vac, list) and vac:
+            carriers = [str(c) for c in vac if c]
+        else:
+            # Fallback: first segment marketing carrier
+            itins = offer.get("itineraries", []) or []
+            if itins:
+                segs = itins[0].get("segments", []) or []
+                if segs:
+                    cc = segs[0].get("carrierCode")
+                    if cc:
+                        carriers = [str(cc)]
+
+        if not carriers:
+            continue
+
+        # offer may have more than one validating carrier; count each
+        for c in carriers:
+            if c not in best or price < best[c]:
+                best[c] = price
+
+    return best
 
 def run_search(profile: dict[str, Any]) -> list[dict[str, Any]]:
     routes = profile.get("routes", [])
