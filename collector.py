@@ -106,18 +106,44 @@ def collect():
         }
 
         try:
-            json_data = amadeus_search_offers(
-                token=token,
-                origin=route["origin"],
-                destination=route["destination"],
-                depart=depart,
-                ret=ret,
-                adults=route["adults"],
-                children=route["children"],
-                non_stop=route.get("direct_only", True),
-                max_results=10,
-            )
-            rows.extend(normalize_offers(json_data, base_row))
+# 1) tenta nonstop (o que você quer)
+json_data = amadeus_search_offers(
+    token=token,
+    origin=route["origin"],
+    destination=route["destination"],
+    depart=depart,
+    ret=ret,
+    adults=route["adults"],
+    children=route["children"],
+    non_stop=True,
+    max_results=10,
+)
+
+tmp_rows = normalize_offers(json_data, base_row)
+
+# Se NÃO retornou nenhuma oferta com preço, faz fallback com escala
+has_price = any(r.get("preco_total") is not None for r in tmp_rows)
+
+if not has_price:
+    json_data_fb = amadeus_search_offers(
+        token=token,
+        origin=route["origin"],
+        destination=route["destination"],
+        depart=depart,
+        ret=ret,
+        adults=route["adults"],
+        children=route["children"],
+        non_stop=False,
+        max_results=10,
+    )
+    fb_rows = normalize_offers(json_data_fb, base_row)
+    # marca como fallback (escala)
+    for r in fb_rows:
+        if r.get("preco_total") is not None:
+            r["observacoes"] = "FALLBACK: sem direto retornado; esta opção tem escala."
+    rows.extend(fb_rows)
+else:
+    rows.extend(tmp_rows)
         except Exception as e:
             rows.append({
                 **base_row,
