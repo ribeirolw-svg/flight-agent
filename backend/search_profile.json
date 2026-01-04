@@ -2,12 +2,14 @@
   "routes": [
     {
       "origin": "GRU",
-      "destination": "JFK",
-      "departure_window": { "from": "2026-09-01", "to": "2026-09-30" },
-      "return_by": "2026-10-15",
+      "destination": "FCO",
+      "departure_window": { "from": "2026-09-01", "to": "2026-10-05" },
+      "return_by": "2026-10-05",
       "cabin": "ECONOMY",
-      "adults": 1,
-      "currency": "BRL"
+      "adults": 2,
+      "children": 1,
+      "currency": "BRL",
+      "notes": "Sao Paulo -> Roma. Regra de ouro: volta ate 05/10/2026"
     }
   ]
 }
