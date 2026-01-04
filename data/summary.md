@@ -1,14 +1,14 @@
 # Flight Agent — Weekly Summary
 
-- Updated: **2026-01-04 20:50 UTC**
-- Latest run_id: `20260104T204931Z`
-- Previous run_id: `20260104T204106Z`
+- Updated: **2026-01-04 21:31 UTC**
+- Latest run_id: `20260104T213039Z`
+- Previous run_id: `20260104T204931Z`
 
 ## Headline — São Paulo → Roma (FCO/CIA)
 
 - **Best this run:** GRU→FCO — **BRL 10,742.30**
 - Dates: depart **2026-09-01** · return **2026-09-11** (≤ 2026-10-05)
-- Key: `GRU-FCO-2026-09-01-2026-10-05-RL2026-10-05-ECONOMY-A2-C1-BRL-99f573235a`
+- Key: `GRU-FCO-2026-09-01-2026-10-05-RL2026-10-05-ECONOMY-A2-C1-BRL-f22cc0d42c`
 
 ## Current Best (from state.json)
 
@@ -16,11 +16,13 @@
 |---|---:|---|
 | `GRU-FCO-2026-09-01-2026-10-05-RL2026-10-05-ECONOMY-A2-C1-BRL-99f573235a` | BRL 10,742.30 | GRU→FCO best_dep=2026-09-01 best_ret=2026-09-11 cabin=ECONOMY A=2 C=1 |
 | `GRU-CIA-2026-09-01-2026-10-05-RL2026-10-05-ECONOMY-A2-C1-BRL-0e6620d852` | N/A | GRU→CIA no offers found dep=2026-09-01..2026-10-05 return<= 2026-10-05 |
+| `GRU-FCO-2026-09-01-2026-10-05-RL2026-10-05-ECONOMY-A2-C1-BRL-f22cc0d42c` | BRL 10,742.30 | GRU→FCO best_dep=2026-09-01 best_ret=2026-09-11 cabin=ECONOMY A=2 C=1 |
+| `GRU-CIA-2026-09-01-2026-10-05-RL2026-10-05-ECONOMY-A2-C1-BRL-74cfd71b60` | N/A | GRU→CIA no offers found dep=2026-09-01..2026-10-05 return<= 2026-10-05 |
 
 ## Latest Run — Snapshot
 
 | Route Key | This Run Best | Change vs Prev |
 |---|---:|---:|
-| `GRU-FCO-2026-09-01-2026-10-05-RL2026-10-05-ECONOMY-A2-C1-BRL-99f573235a` | BRL 10,742.30 | BRL 0.00 |
-| `GRU-CIA-2026-09-01-2026-10-05-RL2026-10-05-ECONOMY-A2-C1-BRL-0e6620d852` | N/A | N/A |
+| `GRU-FCO-2026-09-01-2026-10-05-RL2026-10-05-ECONOMY-A2-C1-BRL-f22cc0d42c` | BRL 10,742.30 | N/A |
+| `GRU-CIA-2026-09-01-2026-10-05-RL2026-10-05-ECONOMY-A2-C1-BRL-74cfd71b60` | N/A | N/A |
 
