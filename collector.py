@@ -5,8 +5,10 @@ import pandas as pd
 from datetime import datetime
 from date_rules import generate_date_pairs
 
-AMADEUS_TOKEN_URL = "https://test.api.amadeus.com/v1/security/oauth2/token"
-AMADEUS_FLIGHT_OFFERS = "https://test.api.amadeus.com/v2/shopping/flight-offers"
+# Dica: se você estiver em produção, troque para https://api.amadeus.com
+BASE_URL = "https://test.api.amadeus.com"
+TOKEN_URL = f"{BASE_URL}/v1/security/oauth2/token"
+FLIGHT_OFFERS = f"{BASE_URL}/v2/shopping/flight-offers"
 
 def load_config():
     with open("routes.yaml", "r", encoding="utf-8") as f:
@@ -14,7 +16,7 @@ def load_config():
 
 def amadeus_get_token(client_id: str, client_secret: str) -> str:
     resp = requests.post(
-        AMADEUS_TOKEN_URL,
+        TOKEN_URL,
         data={
             "grant_type": "client_credentials",
             "client_id": client_id,
@@ -26,7 +28,7 @@ def amadeus_get_token(client_id: str, client_secret: str) -> str:
     return resp.json()["access_token"]
 
 def amadeus_search_offers(token: str, origin: str, destination: str, depart: str, ret: str,
-                          adults: int, children: int, non_stop: bool = True, max_results: int = 25):
+                          adults: int, children: int, max_results: int = 50):
     headers = {"Authorization": f"Bearer {token}"}
     params = {
         "originLocationCode": origin,
@@ -35,23 +37,40 @@ def amadeus_search_offers(token: str, origin: str, destination: str, depart: str
         "returnDate": ret,
         "adults": adults,
         "children": children,
-        "nonStop": "true" if non_stop else "false",
-        "currencyCode": "BRL",  # se preferir "como vier", posso tirar isso; mas BRL facilita leitura
+        # IMPORTANTÍSSIMO: NÃO usar nonStop aqui. Vamos filtrar nós mesmos.
         "max": str(max_results),
+        # Se quiser “como vier”, deixe sem currencyCode.
+        # "currencyCode": "BRL",
     }
-    resp = requests.get(AMADEUS_FLIGHT_OFFERS, headers=headers, params=params, timeout=30)
-    resp.raise_for_status()
+    resp = requests.get(FLIGHT_OFFERS, headers=headers, params=params, timeout=30)
+    # Se der erro, queremos ver o corpo (pra diagnóstico)
+    if resp.status_code >= 400:
+        raise RuntimeError(f"HTTP {resp.status_code}: {resp.text[:300]}")
     return resp.json()
 
-def normalize_offers(data_json, base_row):
+def is_roundtrip_direct(offer: dict) -> bool:
+    """
+    Regra: ida direta = 1 segmento; volta direta = 1 segmento.
+    (É a leitura mais objetiva para “voo direto”.)
+    """
+    itins = offer.get("itineraries", [])
+    if len(itins) < 2:
+        return False
+    out_segs = itins[0].get("segments", [])
+    in_segs = itins[1].get("segments", [])
+    return (len(out_segs) == 1) and (len(in_segs) == 1)
+
+def normalize_direct_offers(data_json, base_row):
     rows = []
-    data = data_json.get("data", [])
-    for offer in data:
+    offers = data_json.get("data", [])
+
+    direct_offers = [o for o in offers if is_roundtrip_direct(o)]
+
+    for offer in direct_offers:
         price = offer.get("price", {})
         grand_total = price.get("grandTotal")
         currency = price.get("currency")
 
-        # tentar puxar companhias (nem sempre vem completo)
         validating = offer.get("validatingAirlineCodes", [])
         airline = validating[0] if validating else None
 
@@ -61,8 +80,10 @@ def normalize_offers(data_json, base_row):
             "companhia": airline,
             "preco_total": grand_total,
             "moeda": currency,
-            "observacoes": None,
+            "observacoes": "Direto (filtrado por segmentos)",
         })
+
+    # Se não achou direto, devolve linha explicativa (não é “erro”, é resultado)
     if not rows:
         rows.append({
             **base_row,
@@ -70,8 +91,9 @@ def normalize_offers(data_json, base_row):
             "companhia": None,
             "preco_total": None,
             "moeda": None,
-            "observacoes": "Sem oferta retornada (nonstop pode estar restritivo ou sem disponibilidade).",
+            "observacoes": "Nenhuma oferta DIRETA retornada para esta data (busca ampla, filtrado por segmentos).",
         })
+
     return rows
 
 def collect():
@@ -87,7 +109,7 @@ def collect():
     client_id = os.environ.get("AMADEUS_CLIENT_ID")
     client_secret = os.environ.get("AMADEUS_CLIENT_SECRET")
     if not client_id or not client_secret:
-        raise RuntimeError("Secrets do Amadeus não configurados no Streamlit (AMADEUS_CLIENT_ID / AMADEUS_CLIENT_SECRET).")
+        raise RuntimeError("Secrets do Amadeus não configurados (AMADEUS_CLIENT_ID / AMADEUS_CLIENT_SECRET).")
 
     token = amadeus_get_token(client_id, client_secret)
 
@@ -102,48 +124,21 @@ def collect():
             "duracao_dias": cfg["date_rule"]["trip_length_days"],
             "adultos": route["adults"],
             "criancas": route["children"],
-            "direto": "S" if route.get("direct_only", True) else "N",
+            "direto": "S",
         }
 
         try:
-# 1) tenta nonstop (o que você quer)
-json_data = amadeus_search_offers(
-    token=token,
-    origin=route["origin"],
-    destination=route["destination"],
-    depart=depart,
-    ret=ret,
-    adults=route["adults"],
-    children=route["children"],
-    non_stop=True,
-    max_results=10,
-)
-
-tmp_rows = normalize_offers(json_data, base_row)
-
-# Se NÃO retornou nenhuma oferta com preço, faz fallback com escala
-has_price = any(r.get("preco_total") is not None for r in tmp_rows)
-
-if not has_price:
-    json_data_fb = amadeus_search_offers(
-        token=token,
-        origin=route["origin"],
-        destination=route["destination"],
-        depart=depart,
-        ret=ret,
-        adults=route["adults"],
-        children=route["children"],
-        non_stop=False,
-        max_results=10,
-    )
-    fb_rows = normalize_offers(json_data_fb, base_row)
-    # marca como fallback (escala)
-    for r in fb_rows:
-        if r.get("preco_total") is not None:
-            r["observacoes"] = "FALLBACK: sem direto retornado; esta opção tem escala."
-    rows.extend(fb_rows)
-else:
-    rows.extend(tmp_rows)
+            json_data = amadeus_search_offers(
+                token=token,
+                origin=route["origin"],
+                destination=route["destination"],
+                depart=depart,
+                ret=ret,
+                adults=route["adults"],
+                children=route["children"],
+                max_results=50,
+            )
+            rows.extend(normalize_direct_offers(json_data, base_row))
         except Exception as e:
             rows.append({
                 **base_row,
@@ -151,14 +146,14 @@ else:
                 "companhia": None,
                 "preco_total": None,
                 "moeda": None,
-                "observacoes": f"Erro na consulta: {type(e).__name__}",
+                "observacoes": f"Erro na consulta: {str(e)[:160]}",
             })
 
     df = pd.DataFrame(rows)
 
-    # ordena: menor preço primeiro (quando existir)
+    # Ordena por menor preço quando houver
     if "preco_total" in df.columns:
-        df["preco_total_num"] = pd.to_numeric(df["preco_total"], errors="coerce")
-        df = df.sort_values(["preco_total_num", "ida"], ascending=[True, True]).drop(columns=["preco_total_num"])
+        df["_preco_num"] = pd.to_numeric(df["preco_total"], errors="coerce")
+        df = df.sort_values(["_preco_num", "ida"], ascending=[True, True]).drop(columns=["_preco_num"])
 
     return df
