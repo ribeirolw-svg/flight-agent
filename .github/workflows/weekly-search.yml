@@ -2,7 +2,8 @@ name: Weekly Flight Search
 
 on:
   schedule:
-    - cron: "0 8 * * 1"   # segunda-feira 08:00 UTC
+    # Segunda-feira 08:00 UTC (05:00 BRT)
+    - cron: "0 8 * * 1"
   workflow_dispatch: {}
 
 jobs:
@@ -23,23 +24,31 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
+      # 1️⃣ RODA O SCHEDULER (busca Amadeus + grava state/history)
       - name: Run scheduler
         env:
           AMADEUS_CLIENT_ID: ${{ secrets.AMADEUS_CLIENT_ID }}
           AMADEUS_CLIENT_SECRET: ${{ secrets.AMADEUS_CLIENT_SECRET }}
+          # SEARCH_PROFILE_JSON pode ficar vazio, usamos o arquivo backend/search_profile.json
           SEARCH_PROFILE_JSON: ${{ secrets.SEARCH_PROFILE_JSON }}
         run: |
           python scheduler.py
 
+      # 2️⃣ GERA O SUMMARY.md A PARTIR DOS ARQUIVOS EM data/
       - name: Generate summary
         run: |
           python report.py
 
-
-      - name: Commit updated state/history (if changed)
+      # 3️⃣ COMMITA TUDO QUE ESTIVER EM data/
+      - name: Commit updated data files
         run: |
           git config user.name "flight-agent-bot"
           git config user.email "flight-agent-bot@users.noreply.github.com"
-          git add data*/state.json data/history.jsonl || true
-          git diff --staged --quiet || git commit -m "chore: update flight search state/history"
+
+          # adiciona TODOS os arquivos da pasta data
+          git add data/
+
+          # só comita se houver mudança
+          git diff --staged --quiet || git commit -m "chore: update flight data (state, history, summary)"
+
           git push
