@@ -1,36 +1,36 @@
 # Flight Agent — Weekly Summary
 
-- Updated: **2026-01-04 21:51 UTC**
-- Latest run_id: `20260104T215041Z`
-- Previous run_id: `20260104T214601Z`
+- Updated: **2026-01-04 21:59 UTC**
+- Latest run_id: `20260104T215841Z`
+- Previous run_id: `20260104T215041Z`
 
 ## Headline — São Paulo → Roma (FCO/CIA)
 
 - **Best this run:** GRU→FCO — **BRL 10,742.30**
 - Dates: depart **2026-09-01** · return **2026-09-11** (≤ 2026-10-05)
-- Key: `GRU-FCO|dep=2026-09-01..2026-10-05|ret<=2026-10-05|class=ECONOMY|A2|C1|BRL|depStep=7|retOff=10`
+- Key: `GRU-FCO\|dep=2026-09-01..2026-10-05\|ret<=2026-10-05\|class=ECONOMY\|A2\|C1\|BRL\|depStep=7\|retOff=10`
 
 ### Roma — by Airline (Top 5)
 
-| Airline (carrier code) | Best Price |
+| Airline | Best Price |
 |---|---:|
-| `AT` | BRL 10,742.30 |
-| `ET` | BRL 12,404.85 |
-| `UX` | BRL 12,508.43 |
-| `AF` | BRL 12,898.33 |
-| `LH` | BRL 13,002.32 |
+| `AT (Royal Air Maroc)` | BRL 10,742.30 |
+| `ET (Ethiopian Airlines)` | BRL 12,404.85 |
+| `UX (Air Europa)` | BRL 12,508.43 |
+| `AF (Air France)` | BRL 12,898.33 |
+| `LH (Lufthansa)` | BRL 13,002.32 |
 
 ## Current Best (from state.json)
 
 | Route Key | Best Price | Notes |
 |---|---:|---|
-| `GRU-FCO|dep=2026-09-01..2026-10-05|ret<=2026-10-05|class=ECONOMY|A2|C1|BRL|depStep=7|retOff=10` | BRL 10,742.30 | GRU→FCO best_dep=2026-09-01 best_ret=2026-09-11 cabin=ECONOMY A=2 C=1 |
-| `GRU-CIA|dep=2026-09-01..2026-10-05|ret<=2026-10-05|class=ECONOMY|A2|C1|BRL|depStep=7|retOff=10` | N/A | GRU→CIA no offers found dep=2026-09-01..2026-10-05 return<= 2026-10-05 |
+| `GRU-FCO\|dep=2026-09-01..2026-10-05\|ret<=2026-10-05\|class=ECONOMY\|A2\|C1\|BRL\|depStep=7\|retOff=10` | BRL 10,742.30 | GRU→FCO best_dep=2026-09-01 best_ret=2026-09-11 cabin=ECONOMY A=2 C=1 |
+| `GRU-CIA\|dep=2026-09-01..2026-10-05\|ret<=2026-10-05\|class=ECONOMY\|A2\|C1\|BRL\|depStep=7\|retOff=10` | N/A | GRU→CIA no offers found dep=2026-09-01..2026-10-05 return<= 2026-10-05 |
 
 ## Latest Run — Snapshot
 
 | Route Key | This Run Best | Change vs Prev |
 |---|---:|---:|
-| `GRU-FCO|dep=2026-09-01..2026-10-05|ret<=2026-10-05|class=ECONOMY|A2|C1|BRL|depStep=7|retOff=10` | BRL 10,742.30 | BRL 0.00 |
-| `GRU-CIA|dep=2026-09-01..2026-10-05|ret<=2026-10-05|class=ECONOMY|A2|C1|BRL|depStep=7|retOff=10` | N/A | N/A |
+| `GRU-FCO\|dep=2026-09-01..2026-10-05\|ret<=2026-10-05\|class=ECONOMY\|A2\|C1\|BRL\|depStep=7\|retOff=10` | BRL 10,742.30 | BRL 0.00 |
+| `GRU-CIA\|dep=2026-09-01..2026-10-05\|ret<=2026-10-05\|class=ECONOMY\|A2\|C1\|BRL\|depStep=7\|retOff=10` | N/A | N/A |
 
