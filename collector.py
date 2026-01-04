@@ -4,6 +4,7 @@ import requests
 import pandas as pd
 from datetime import datetime
 from date_rules import generate_date_pairs
+from typing import Optional, Dict
 
 BASE_URL = "https://test.api.amadeus.com"
 TOKEN_URL = f"{BASE_URL}/v1/security/oauth2/token"
