@@ -1,8 +1,8 @@
 # Flight Agent — Weekly Summary
 
-- Updated: **2026-01-04 21:59 UTC**
-- Latest run_id: `20260104T215841Z`
-- Previous run_id: `20260104T215041Z`
+- Updated: **2026-01-04 22:05 UTC**
+- Latest run_id: `20260104T220447Z`
+- Previous run_id: `20260104T215841Z`
 
 ## Headline — São Paulo → Roma (FCO/CIA)
 
@@ -19,6 +19,28 @@
 | `UX (Air Europa)` | BRL 12,508.43 |
 | `AF (Air France)` | BRL 12,898.33 |
 | `LH (Lufthansa)` | BRL 13,002.32 |
+
+## Per Destination — Airline Split
+
+### FCO — by Airline (Top 5)
+
+- Best FCO this run: **BRL 10,742.30**
+- Dates: depart **2026-09-01** · return **2026-09-11** (≤ 2026-10-05)
+
+| Airline | Best Price |
+|---|---:|
+| `AT (Royal Air Maroc)` | BRL 10,742.30 |
+| `ET (Ethiopian Airlines)` | BRL 12,404.85 |
+| `UX (Air Europa)` | BRL 12,508.43 |
+| `AF (Air France)` | BRL 12,898.33 |
+| `LH (Lufthansa)` | BRL 13,002.32 |
+
+### CIA — by Airline (Top 5)
+
+- Best CIA this run: **N/A**
+- Dates: depart **—** · return **—** (≤ 2026-10-05)
+
+_No airline split available for this run._
 
 ## Current Best (from state.json)
 
