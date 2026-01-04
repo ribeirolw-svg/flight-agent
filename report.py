@@ -12,8 +12,8 @@ STATE_PATH = DATA_DIR / "state.json"
 HISTORY_PATH = DATA_DIR / "history.jsonl"
 SUMMARY_PATH = DATA_DIR / "summary.md"
 
-# Keep only Rome keys for the canonical "return until" version
-KEEP_REGEX = re.compile(r"^GRU-(FCO|CIA)-.*-RL2026-10-05-.*$")
+# New no-hash keys look like: GRU-FCO|dep=...|ret<=2026-10-05|...
+KEEP_REGEX = re.compile(r"^GRU-(FCO|CIA)\|.*\|ret<=2026-10-05\|.*$")
 
 
 def _read_json(path: Path) -> Dict[str, Any]:
@@ -70,6 +70,12 @@ def _infer_destination(r: Dict[str, Any]) -> str:
         return "FCO"
     if "→CIA" in s:
         return "CIA"
+    # if key present, infer from it
+    k = str(r.get("key", "") or "")
+    if k.startswith("GRU-FCO|"):
+        return "FCO"
+    if k.startswith("GRU-CIA|"):
+        return "CIA"
     return "ROM"
 
 
@@ -122,7 +128,6 @@ def main() -> int:
 
     state = _read_json(STATE_PATH)
     best_map: Dict[str, Any] = state.get("best", {}) if isinstance(state.get("best", {}), dict) else {}
-    # Shield summary from legacy keys
     best_map = {k: v for k, v in best_map.items() if KEEP_REGEX.match(k)}
 
     history = _read_history_last(2)
@@ -132,7 +137,6 @@ def main() -> int:
     curr_results = curr_run.get("results", []) if curr_run else []
     prev_results = prev_run.get("results", []) if prev_run else []
 
-    # Filter Rome-only in snapshots as well
     curr_results_filtered = [r for r in curr_results if KEEP_REGEX.match(str(r.get("key", "")))]
     prev_results_filtered = [r for r in prev_results if KEEP_REGEX.match(str(r.get("key", "")))]
 
@@ -151,7 +155,6 @@ def main() -> int:
         md.append(f"- Previous run_id: `{prev_run.get('run_id','')}`")
     md.append("")
 
-    # Headline: best Rome (FCO/CIA)
     md.append("## Headline — São Paulo → Roma (FCO/CIA)")
     md.append("")
     best_rome = _pick_best_rome(curr_results_filtered)
