@@ -1,17 +1,17 @@
 {
   "best": {
-    "GRU-FCO-2026-09-01-2026-10-05-RL2026-10-05-ECONOMY-A2-C1-BRL-f22cc0d42c": {
+    "GRU-FCO|dep=2026-09-01..2026-10-05|ret<=2026-10-05|class=ECONOMY|A2|C1|BRL|depStep=7|retOff=10": {
       "price": 10742.3,
       "currency": "BRL",
-      "run_id": "20260104T213039Z",
-      "ts_utc": "2026-01-04T21:31:39.116765+00:00",
+      "run_id": "20260104T214601Z",
+      "ts_utc": "2026-01-04T21:46:55.687481+00:00",
       "summary": "GRU→FCO best_dep=2026-09-01 best_ret=2026-09-11 cabin=ECONOMY A=2 C=1"
     },
-    "GRU-CIA-2026-09-01-2026-10-05-RL2026-10-05-ECONOMY-A2-C1-BRL-74cfd71b60": {
+    "GRU-CIA|dep=2026-09-01..2026-10-05|ret<=2026-10-05|class=ECONOMY|A2|C1|BRL|depStep=7|retOff=10": {
       "price": Infinity,
       "currency": "BRL",
-      "run_id": "20260104T213039Z",
-      "ts_utc": "2026-01-04T21:31:39.116780+00:00",
+      "run_id": "20260104T214601Z",
+      "ts_utc": "2026-01-04T21:46:55.687495+00:00",
       "summary": "GRU→CIA no offers found dep=2026-09-01..2026-10-05 return<= 2026-10-05"
     }
   }
