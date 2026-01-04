@@ -87,7 +87,12 @@ def main() -> int:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
 
     state = _read_json(STATE_PATH)
+    import re
+    KEEP_REGEX = re.compile(r"^GRU-(FCO|CIA)-.*-RL2026-10-05-.*$")
+    
     best_map: Dict[str, Any] = state.get("best", {}) if isinstance(state.get("best", {}), dict) else {}
+    best_map = {k: v for k, v in best_map.items() if KEEP_REGEX.match(k)}
+
 
     history = _read_history_last(2)
     curr_run = history[-1] if len(history) >= 1 else None
