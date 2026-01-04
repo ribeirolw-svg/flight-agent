@@ -1,0 +1,13 @@
+{
+  "routes": [
+    {
+      "origin": "GRU",
+      "destination": "JFK",
+      "departure_window": { "from": "2026-09-01", "to": "2026-09-30" },
+      "return_by": "2026-10-15",
+      "cabin": "ECONOMY",
+      "adults": 1,
+      "currency": "BRL"
+    }
+  ]
+}
