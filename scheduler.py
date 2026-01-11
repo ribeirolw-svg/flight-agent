@@ -1,6 +1,5 @@
 import os
 import json
-import uuid
 import yaml
 from datetime import datetime, timezone, date, timedelta
 from typing import Dict, Any, List, Tuple, Optional
@@ -77,8 +76,6 @@ def route_key(origin: str, destination: str, cfg: Dict[str, Any]) -> str:
     cabin = (r.get("cabin") or "ECONOMY").strip().upper()
     currency = "BRL"
 
-    # chave no estilo do seu state atual (não precisa ser idêntica, mas ajuda continuidade)
-    # dep range e ret deadline vêm do date_rule
     dep_start = dr.get("depart_start")
     ret_deadline = dr.get("return_deadline")
     return (
@@ -99,48 +96,21 @@ def pick_price_total(offer: Dict[str, Any]) -> Optional[float]:
         return None
 
 
-def main() -> None:
-    if not os.path.exists(CONFIG_FILE):
-        raise FileNotFoundError(f"Não achei routes.yaml em: {CONFIG_FILE}")
-
-    cfg = load_yaml(CONFIG_FILE)
-    route = cfg.get("route") or {}
-    date_rule = cfg.get("date_rule") or {}
-    sources = cfg.get("sources") or ["amadeus"]
-    use_amadeus = "amadeus" in [s.lower() for s in sources]
-
-    origin = (route.get("origin") or "GRU").strip().upper()
-    destination = (route.get("destination") or "FCO").strip().upper()
-    direct_only = bool(route.get("direct_only", True))
-    adults = int(route.get("adults", 1))
-    children = int(route.get("children", 0))
-    cabin = (route.get("cabin") or "ECONOMY").strip().upper()
-
-    pairs = build_trip_pairs(date_rule)
-
-    run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    ts_utc = datetime.now(timezone.utc).isoformat()
-
-    print("=======================================")
-    print("RUN_ID:", run_id)
-    print("TS_UTC:", ts_utc)
-    print("origin/destination:", origin, destination)
-    print("direct_only:", direct_only, "| adults:", adults, "| children:", children, "| cabin:", cabin)
-    print("pairs_count:", len(pairs))
-    print("sources:", sources)
-    print("=======================================")
-
-    if not use_amadeus:
-        print("[INFO] 'amadeus' não está em sources. Nada a fazer.")
-        return
-
-    # Carrega state atual
-    state = load_json(STATE_PATH, default={"best": {}, "meta": {"previous_run_id": None, "latest_run_id": None}})
-    best_map = state.get("best", {}) if isinstance(state.get("best"), dict) else {}
-    meta = state.get("meta", {}) if isinstance(state.get("meta"), dict) else {}
-    prev_latest = meta.get("latest_run_id")
-
-    # agrega “melhor do run”
+def run_for_destination(
+    cfg: Dict[str, Any],
+    origin: str,
+    destination: str,
+    direct_only: bool,
+    adults: int,
+    children: int,
+    cabin: str,
+    pairs: List[Tuple[str, str]],
+    run_id: str,
+    ts_utc: str,
+) -> Tuple[Optional[float], Optional[str], Optional[str], Dict[str, float]]:
+    """
+    Retorna: (best_price, best_dep, best_ret, by_carrier_best)
+    """
     best_price_run: Optional[float] = None
     best_dep_run: Optional[str] = None
     best_ret_run: Optional[str] = None
@@ -163,7 +133,7 @@ def main() -> None:
         )
 
         offers = raw.get("data", []) or []
-        # grava histórico (uma linha por consulta, com resumo)
+
         append_jsonl(HISTORY_PATH, {
             "run_id": run_id,
             "ts_utc": ts_utc,
@@ -182,13 +152,11 @@ def main() -> None:
             validating = offer.get("validatingAirlineCodes")
             carrier = validating[0] if isinstance(validating, list) and validating else "—"
 
-            # melhor por companhia (dentro do run)
             if carrier != "—":
                 cur = by_carrier_best.get(carrier)
                 if cur is None or price < cur:
                     by_carrier_best[carrier] = price
 
-            # melhor absoluto do run
             if best_price_run is None or price < best_price_run:
                 best_price_run = price
                 best_dep_run = dep
@@ -196,51 +164,115 @@ def main() -> None:
 
         print(f"[OK] {origin}->{destination} {dep}->{ret} offers={len(offers)}")
 
-    # Atualiza state.best (rota específica)
-    k = route_key(origin, destination, cfg)
-    if best_price_run is None:
-        # sem ofertas
-        best_map[k] = {
-            "price": float("inf"),
-            "currency": "BRL",
-            "run_id": run_id,
-            "ts_utc": ts_utc,
-            "summary": f"{origin}→{destination} no offers found dep={date_rule.get('depart_start')}..{date_rule.get('return_deadline')}",
-        }
-    else:
-        best_map[k] = {
-            "price_total": best_price_run,   # o Streamlit prefere price_total
-            "price": best_price_run,         # fallback
-            "currency": "BRL",
-            "run_id": run_id,
-            "ts_utc": ts_utc,
-            "best_dep": best_dep_run,
-            "best_ret": best_ret_run,
-            "destination": destination,
-            "by_carrier": by_carrier_best,
-            "summary": f"{origin}→{destination} best_dep={best_dep_run} best_ret={best_ret_run} cabin={cabin} A={adults} C={children}",
-        }
+    return best_price_run, best_dep_run, best_ret_run, by_carrier_best
+
+
+def main() -> None:
+    if not os.path.exists(CONFIG_FILE):
+        raise FileNotFoundError(f"Não achei routes.yaml em: {CONFIG_FILE}")
+
+    cfg = load_yaml(CONFIG_FILE)
+    route = cfg.get("route") or {}
+    date_rule = cfg.get("date_rule") or {}
+    sources = cfg.get("sources") or ["amadeus"]
+    use_amadeus = "amadeus" in [s.lower() for s in sources]
+
+    origin = (route.get("origin") or "GRU").strip().upper()
+    base_destination = (route.get("destination") or "FCO").strip().upper()
+
+    # Aqui está a mudança principal: vamos sempre atualizar Roma (FCO/CIA).
+    # Se você quiser manter flexível, dá pra ler do YAML depois.
+    destinations_to_run = ["FCO", "CIA"] if base_destination in {"FCO", "CIA"} else [base_destination]
+
+    direct_only = bool(route.get("direct_only", True))
+    adults = int(route.get("adults", 1))
+    children = int(route.get("children", 0))
+    cabin = (route.get("cabin") or "ECONOMY").strip().upper()
+
+    pairs = build_trip_pairs(date_rule)
+
+    run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    ts_utc = datetime.now(timezone.utc).isoformat()
+
+    print("=======================================")
+    print("RUN_ID:", run_id)
+    print("TS_UTC:", ts_utc)
+    print("origin:", origin)
+    print("destinations_to_run:", destinations_to_run)
+    print("direct_only:", direct_only, "| adults:", adults, "| children:", children, "| cabin:", cabin)
+    print("pairs_count:", len(pairs))
+    print("sources:", sources)
+    print("=======================================")
+
+    if not use_amadeus:
+        print("[INFO] 'amadeus' não está em sources. Nada a fazer.")
+        return
+
+    state = load_json(STATE_PATH, default={"best": {}, "meta": {"previous_run_id": None, "latest_run_id": None}})
+    best_map = state.get("best", {}) if isinstance(state.get("best"), dict) else {}
+    meta = state.get("meta", {}) if isinstance(state.get("meta"), dict) else {}
+    prev_latest = meta.get("latest_run_id")
+
+    # Para o summary
+    headline_lines = []
+
+    for destination in destinations_to_run:
+        best_price_run, best_dep_run, best_ret_run, by_carrier_best = run_for_destination(
+            cfg=cfg,
+            origin=origin,
+            destination=destination,
+            direct_only=direct_only,
+            adults=adults,
+            children=children,
+            cabin=cabin,
+            pairs=pairs,
+            run_id=run_id,
+            ts_utc=ts_utc,
+        )
+
+        k = route_key(origin, destination, cfg)
+
+        if best_price_run is None:
+            best_map[k] = {
+                "price_total": None,
+                "price": float("inf"),  # app antigo pode cair aqui; vamos melhorar no app depois
+                "currency": "BRL",
+                "run_id": run_id,
+                "ts_utc": ts_utc,
+                "destination": destination,
+                "by_carrier": {},  # garante que existe
+                "summary": f"{origin}→{destination} no offers found dep={date_rule.get('depart_start')}..{date_rule.get('return_deadline')}",
+            }
+            headline_lines.append(f"- {origin}→{destination}: **N/A** (sem ofertas)")
+        else:
+            best_map[k] = {
+                "price_total": best_price_run,
+                "price": best_price_run,
+                "currency": "BRL",
+                "run_id": run_id,
+                "ts_utc": ts_utc,
+                "best_dep": best_dep_run,
+                "best_ret": best_ret_run,
+                "destination": destination,
+                "by_carrier": by_carrier_best,
+                "summary": f"{origin}→{destination} best_dep={best_dep_run} best_ret={best_ret_run} cabin={cabin} A={adults} C={children}",
+            }
+            headline_lines.append(f"- {origin}→{destination}: **BRL {best_price_run:,.2f}** ({best_dep_run} → {best_ret_run})")
 
     meta["previous_run_id"] = prev_latest
     meta["latest_run_id"] = run_id
-
     save_json(STATE_PATH, {"best": best_map, "meta": meta})
 
-    # Summary simples (o suficiente pra “mexer” sempre que o run rodar)
     updated = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-    best_line = "N/A" if best_price_run is None else f"BRL {best_price_run:,.2f}"
-
-    summary_md = f"""# Flight Agent — Weekly Summary
+    summary_md = f"""# Flight Agent — Daily Summary
 
 - Updated: **{updated}**
 - Latest run_id: `{run_id}`
 - Previous run_id: `{prev_latest or "—"}`
 
-## Headline — {origin} → {destination}
+## Headline — {origin} → Roma (FCO/CIA)
 
-- **Best this run:** {origin}→{destination} — **{best_line}**
-- Dates: depart **{best_dep_run or "—"}** · return **{best_ret_run or "—"}**
-- Key: `{k}`
+{chr(10).join(headline_lines)}
 """
     with open(SUMMARY_PATH, "w", encoding="utf-8") as f:
         f.write(summary_md)
