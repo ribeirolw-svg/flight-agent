@@ -1,40 +1,197 @@
 import os
-import requests
-from datetime import datetime, timezone
-from typing import Tuple, Dict, Any
+import json
+import uuid
+import yaml
+from datetime import datetime, timezone, date, timedelta
+from typing import Dict, Any, List, Tuple, Optional
 
-# ==========================================
-# 1) CONFIG DE AMBIENTE (test vs prod)
-# ==========================================
-AMADEUS_ENV = os.getenv("AMADEUS_ENV", "test").lower().strip()
+from search import search_flights
 
-BASE_URL = "https://api.amadeus.com" if AMADEUS_ENV == "prod" else "https://test.api.amadeus.com"
-TOKEN_URL = f"{BASE_URL}/v1/security/oauth2/token"
-FLIGHT_OFFERS_URL = f"{BASE_URL}/v2/shopping/flight-offers"
 
-# ==========================================
-# 2) MODO TEMPORÁRIO (APENAS PARA TESTE)
-# ==========================================
-TEMP_CLIENT_ID = os.getenv("AMADEUS_TEMP_CLIENT_ID", "").strip() or "COLE_SUA_CHAVE_NOVA_AQUI"
-TEMP_CLIENT_SECRET = os.getenv("AMADEUS_TEMP_CLIENT_SECRET", "").strip() or "COLE_SEU_SECRET_NOVO_AQUI"
+PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
+CONFIG_FILE = os.path.join(PROJECT_DIR, "routes.yaml")
 
-# ==========================================
-# 3) FUNÇÃO: pegar credenciais (prioridade TEMP)
-# ==========================================
-def get_amadeus_creds() -> Tuple[str, str]:
-    temp_filled = (
-        TEMP_CLIENT_ID
-        and TEMP_CLIENT_SECRET
-        and "COLE_SUA_CHAVE" not in TEMP_CLIENT_ID
-        and "COLE_SEU_SECRET" not in TEMP_CLIENT_SECRET
+DATA_DIR = os.getenv("DATA_DIR", os.path.join(PROJECT_DIR, "data"))
+os.makedirs(DATA_DIR, exist_ok=True)
+
+STATE_PATH = os.path.join(DATA_DIR, "state.json")
+SUMMARY_PATH = os.path.join(DATA_DIR, "summary.md")
+HISTORY_PATH = os.path.join(DATA_DIR, "history.jsonl")
+
+
+def load_yaml(path: str) -> Dict[str, Any]:
+    with open(path, "r", encoding="utf-8") as f:
+        return yaml.safe_load(f) or {}
+
+
+def load_json(path: str, default: Any) -> Any:
+    if not os.path.exists(path):
+        return default
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def save_json(path: str, data: Any) -> None:
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+
+def append_jsonl(path: str, obj: Dict[str, Any]) -> None:
+    with open(path, "a", encoding="utf-8") as f:
+        f.write(json.dumps(obj, ensure_ascii=False) + "\n")
+
+
+def parse_yyyy_mm_dd(s: str) -> date:
+    y, m, d = [int(x) for x in s.split("-")]
+    return date(y, m, d)
+
+
+def daterange(start: date, end: date) -> List[date]:
+    out = []
+    cur = start
+    while cur <= end:
+        out.append(cur)
+        cur += timedelta(days=1)
+    return out
+
+
+def build_trip_pairs(date_rule: Dict[str, Any]) -> List[Tuple[str, str]]:
+    depart_start = parse_yyyy_mm_dd(date_rule["depart_start"])
+    depart_end = parse_yyyy_mm_dd(date_rule["depart_end"])
+    trip_len = int(date_rule["trip_length_days"])
+    return_deadline = parse_yyyy_mm_dd(date_rule["return_deadline"])
+
+    pairs = []
+    for dep in daterange(depart_start, depart_end):
+        ret = dep + timedelta(days=trip_len)
+        if ret <= return_deadline:
+            pairs.append((dep.isoformat(), ret.isoformat()))
+    return pairs
+
+
+def route_key(origin: str, destination: str, cfg: Dict[str, Any]) -> str:
+    r = cfg.get("route") or {}
+    dr = cfg.get("date_rule") or {}
+    adults = int(r.get("adults", 1))
+    children = int(r.get("children", 0))
+    cabin = (r.get("cabin") or "ECONOMY").strip().upper()
+    currency = "BRL"
+
+    # chave no estilo do seu state atual (não precisa ser idêntica, mas ajuda continuidade)
+    # dep range e ret deadline vêm do date_rule
+    dep_start = dr.get("depart_start")
+    ret_deadline = dr.get("return_deadline")
+    return (
+        f"{origin}-{destination}"
+        f"|dep={dep_start}..{ret_deadline}"
+        f"|ret<={ret_deadline}"
+        f"|class={cabin}"
+        f"|A{adults}|C{children}|{currency}"
     )
-    if temp_filled:
-        return TEMP_CLIENT_ID, TEMP_CLIENT_SECRET
 
-    if AMADEUS_ENV == "prod":
-        return os.environ["AMADEUS_CLIENT_ID_PROD"], os.environ["AMADEUS_CLIENT_SECRET_PROD"]
-    return os.environ["AMADEUS_CLIENT_ID_TEST"], os.environ["AMADEUS_CLIENT_SECRET_TEST"]
 
-# ==========================================
-# 4) DEBUG: prova de vida
-# ================================
+def pick_price_total(offer: Dict[str, Any]) -> Optional[float]:
+    try:
+        price_obj = offer.get("price") or {}
+        val = price_obj.get("grandTotal")
+        return float(val) if val is not None else None
+    except Exception:
+        return None
+
+
+def main() -> None:
+    if not os.path.exists(CONFIG_FILE):
+        raise FileNotFoundError(f"Não achei routes.yaml em: {CONFIG_FILE}")
+
+    cfg = load_yaml(CONFIG_FILE)
+    route = cfg.get("route") or {}
+    date_rule = cfg.get("date_rule") or {}
+    sources = cfg.get("sources") or ["amadeus"]
+    use_amadeus = "amadeus" in [s.lower() for s in sources]
+
+    origin = (route.get("origin") or "GRU").strip().upper()
+    destination = (route.get("destination") or "FCO").strip().upper()
+    direct_only = bool(route.get("direct_only", True))
+    adults = int(route.get("adults", 1))
+    children = int(route.get("children", 0))
+    cabin = (route.get("cabin") or "ECONOMY").strip().upper()
+
+    pairs = build_trip_pairs(date_rule)
+
+    run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    ts_utc = datetime.now(timezone.utc).isoformat()
+
+    print("=======================================")
+    print("RUN_ID:", run_id)
+    print("TS_UTC:", ts_utc)
+    print("origin/destination:", origin, destination)
+    print("direct_only:", direct_only, "| adults:", adults, "| children:", children, "| cabin:", cabin)
+    print("pairs_count:", len(pairs))
+    print("sources:", sources)
+    print("=======================================")
+
+    if not use_amadeus:
+        print("[INFO] 'amadeus' não está em sources. Nada a fazer.")
+        return
+
+    # Carrega state atual
+    state = load_json(STATE_PATH, default={"best": {}, "meta": {"previous_run_id": None, "latest_run_id": None}})
+    best_map = state.get("best", {}) if isinstance(state.get("best"), dict) else {}
+    meta = state.get("meta", {}) if isinstance(state.get("meta"), dict) else {}
+    prev_latest = meta.get("latest_run_id")
+
+    # agrega “melhor do run”
+    best_price_run: Optional[float] = None
+    best_dep_run: Optional[str] = None
+    best_ret_run: Optional[str] = None
+    by_carrier_best: Dict[str, float] = {}
+
+    max_results = int(os.getenv("AMADEUS_MAX_RESULTS", "10"))
+
+    for dep, ret in pairs:
+        raw = search_flights(
+            origin=origin,
+            destination=destination,
+            departure_date=dep,
+            return_date=ret,
+            adults=adults,
+            children=children,
+            travel_class=cabin,
+            currency="BRL",
+            nonstop=direct_only,
+            max_results=max_results,
+        )
+
+        offers = raw.get("data", []) or []
+        # grava histórico (uma linha por consulta, com resumo)
+        append_jsonl(HISTORY_PATH, {
+            "run_id": run_id,
+            "ts_utc": ts_utc,
+            "origin": origin,
+            "destination": destination,
+            "departure_date": dep,
+            "return_date": ret,
+            "offers_count": len(offers),
+        })
+
+        for offer in offers:
+            price = pick_price_total(offer)
+            if price is None:
+                continue
+
+            validating = offer.get("validatingAirlineCodes")
+            carrier = validating[0] if isinstance(validating, list) and validating else "—"
+
+            # melhor por companhia (dentro do run)
+            if carrier != "—":
+                cur = by_carrier_best.get(carrier)
+                if cur is None or price < cur:
+                    by_carrier_best[carrier] = price
+
+            # melhor absoluto do run
+            if best_price_run is None or price < best_price_run:
+                best_price_run = price
+                best_dep_run = dep
+                best_ret_run = ret
+
+        print(f"[OK] {origin}
