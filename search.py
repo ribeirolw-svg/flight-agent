@@ -58,16 +58,37 @@ def _min_update(d: Dict[str, float], key: str, val: float) -> None:
 
 
 def _carrier_from_offer(offer: Dict[str, Any]) -> Optional[str]:
-    # Amadeus normalmente retorna validatingAirlineCodes
     codes = offer.get("validatingAirlineCodes")
     if isinstance(codes, list) and codes:
         return str(codes[0])
-    # fallback: tenta pegar do primeiro segmento
     try:
         seg = offer["itineraries"][0]["segments"][0]
         return str(seg["carrierCode"])
     except Exception:
         return None
+
+
+def _extract_prices(offer: Dict[str, Any]) -> Tuple[Optional[float], Optional[float]]:
+    """
+    Retorna (base, total)
+    - base: sem taxas (price.base)
+    - total: com taxas (price.grandTotal ou price.total)
+    """
+    price_obj = offer.get("price") or {}
+
+    base = _to_float(price_obj.get("base"))
+    # Amadeus costuma ter grandTotal; se não, usa total
+    total = _to_float(price_obj.get("grandTotal"))
+    if total is None:
+        total = _to_float(price_obj.get("total"))
+
+    # Fallbacks: se um deles faltar, tenta preencher com o outro
+    if base is None and total is not None:
+        base = total
+    if total is None and base is not None:
+        total = base
+
+    return base, total
 
 
 # ----------------------------
@@ -119,7 +140,6 @@ def _normalize_profile(profile: Dict[str, Any]) -> Dict[str, Any]:
     """
     p = dict(profile or {})
 
-    # valores padrão
     p.setdefault("origin", "GRU")
     p.setdefault("destinations", ["FCO", "CIA"])
     p.setdefault("travelClass", "ECONOMY")
@@ -133,9 +153,7 @@ def _normalize_profile(profile: Dict[str, Any]) -> Dict[str, Any]:
     if "class" in p and "travelClass" not in p:
         p["travelClass"] = p["class"]
 
-    # 🔥 REMENDO DO PONTO 1:
-    # Força children e ignora qualquer coisa relacionada a infants/idade.
-    # Se alguém colocou infants por engano, simplesmente não enviamos.
+    # 🔥 ponto 1: força children e remove infants/idade
     p.pop("infants", None)
     p.pop("infant", None)
     p.pop("child_age", None)
@@ -145,16 +163,11 @@ def _normalize_profile(profile: Dict[str, Any]) -> Dict[str, Any]:
     p["adults"] = int(p.get("adults", 0) or 0)
     p["children"] = int(p.get("children", 0) or 0)
 
-    # limites mínimos
     if p["adults"] <= 0:
         raise ValueError("Profile inválido: adults deve ser >= 1.")
     if p["children"] < 0:
         raise ValueError("Profile inválido: children não pode ser negativo.")
 
-    # datas obrigatórias
-    # Aceita tanto:
-    #  - dep_start/dep_end/return_by
-    #  - departure_from/departure_to/return_by
     dep_start = p.get("dep_start") or p.get("departure_from") or p.get("departure_start")
     dep_end = p.get("dep_end") or p.get("departure_to") or p.get("departure_end")
     return_by = p.get("return_by") or p.get("return_limit")
@@ -169,9 +182,12 @@ def _normalize_profile(profile: Dict[str, Any]) -> Dict[str, Any]:
     p["_dep_end"] = _parse_iso_date(str(dep_end))
     p["_return_by"] = _parse_iso_date(str(return_by))
 
-    # steps
     p["dep_step_days"] = int(p.get("dep_step_days") or p.get("depStep") or 7)
     p["ret_offset_days"] = int(p.get("ret_offset_days") or p.get("retOff") or 10)
+
+    # escolha de ranking: total ou base
+    # default: total (com taxas)
+    p["rank_by"] = str(p.get("rank_by") or "total").lower()  # "total" or "base"
 
     return p
 
@@ -179,7 +195,9 @@ def _normalize_profile(profile: Dict[str, Any]) -> Dict[str, Any]:
 def run_search(profile: Dict[str, Any]) -> List[Dict[str, Any]]:
     """
     Retorna lista de resultados por destino (FCO/CIA) contendo:
-      key, origin, destination, currency, price, best_dep, best_ret, by_carrier, summary
+      key, origin, destination, currency,
+      price_base, price_total, price (compat: usa rank_by),
+      best_dep, best_ret, by_carrier, summary
     """
     p = _normalize_profile(profile)
     client = AmadeusClient()
@@ -196,19 +214,21 @@ def run_search(profile: Dict[str, Any]) -> List[Dict[str, Any]]:
     children = int(p["children"])
     travel_class = str(p["travelClass"]).upper()
     currency = str(p["currencyCode"]).upper()
+    rank_by = p["rank_by"]  # "total" or "base"
 
     results: List[Dict[str, Any]] = []
 
     for dest in destinations:
-        # Agregadores por destino (janela inteira)
-        best_price: Optional[float] = None
+        # agregação por destino
+        best_rank_price: Optional[float] = None
+        best_price_base: Optional[float] = None
+        best_price_total: Optional[float] = None
         best_dep: Optional[str] = None
         best_ret: Optional[str] = None
         by_carrier: Dict[str, float] = {}
         offers_found = False
 
         for dep in dep_dates:
-            # volta: dep + offset, mas nunca passando do return_by
             ret = dep + timedelta(days=ret_offset_days)
             if ret > return_by:
                 ret = return_by
@@ -219,15 +239,12 @@ def run_search(profile: Dict[str, Any]) -> List[Dict[str, Any]]:
                 "departureDate": dep.isoformat(),
                 "returnDate": ret.isoformat(),
                 "adults": adults,
-                # ✅ CRIANÇA 2–11: usar children (e NÃO infants)
+                # ✅ criança 2–11
                 "children": children,
                 "travelClass": travel_class,
                 "currencyCode": currency,
                 "max": 20,
             }
-
-            # ✅ NÃO ENVIAR infants em hipótese alguma (mesmo que children=0)
-            # params.pop("infants", None)  # nem existe aqui, só garantindo ideia
 
             data = client.flight_offers_search(params)
             offers = data.get("data") or []
@@ -237,22 +254,27 @@ def run_search(profile: Dict[str, Any]) -> List[Dict[str, Any]]:
             offers_found = True
 
             for offer in offers:
-                # Preço: aqui usamos "base" (sem taxas) como você falou que tudo bem.
-                # Se quiser trocar pra com taxas, use grandTotal/total.
-                price_obj = offer.get("price") or {}
-                price_base = _to_float(price_obj.get("base"))  # sem taxas
-                if price_base is None:
-                    # fallback
-                    price_base = _to_float(price_obj.get("total")) or _to_float(price_obj.get("grandTotal"))
+                base, total = _extract_prices(offer)
+                if base is None and total is None:
+                    continue
 
-                if price_base is None:
+                # escolhe ranking
+                rank_price = total if rank_by == "total" else base
+                rank_price = rank_price if rank_price is not None else (total or base)
+                if rank_price is None:
                     continue
 
                 carrier = _carrier_from_offer(offer) or "??"
-                _min_update(by_carrier, carrier, price_base)
+                # por carrier a gente guarda o menor TOTAL (mais útil)
+                if total is not None:
+                    _min_update(by_carrier, carrier, total)
+                else:
+                    _min_update(by_carrier, carrier, rank_price)
 
-                if best_price is None or price_base < best_price:
-                    best_price = price_base
+                if best_rank_price is None or rank_price < best_rank_price:
+                    best_rank_price = rank_price
+                    best_price_base = base
+                    best_price_total = total
                     best_dep = dep.isoformat()
                     best_ret = ret.isoformat()
 
@@ -263,6 +285,7 @@ def run_search(profile: Dict[str, Any]) -> List[Dict[str, Any]]:
             f"|class={travel_class}"
             f"|A{adults}|C{children}|{currency}"
             f"|depStep={p['dep_step_days']}|retOff={ret_offset_days}"
+            f"|rank={rank_by}"
         )
 
         if not offers_found:
@@ -272,7 +295,9 @@ def run_search(profile: Dict[str, Any]) -> List[Dict[str, Any]]:
                     "origin": origin,
                     "destination": dest,
                     "currency": currency,
-                    "price": None,
+                    "price": None,           # compat
+                    "price_base": None,
+                    "price_total": None,
                     "best_dep": None,
                     "best_ret": None,
                     "by_carrier": {},
@@ -283,19 +308,27 @@ def run_search(profile: Dict[str, Any]) -> List[Dict[str, Any]]:
                 }
             )
         else:
+            # compat: "price" = o que você escolheu para rankear
+            price_compat = best_price_total if rank_by == "total" else best_price_base
+            if price_compat is None:
+                price_compat = best_rank_price
+
             results.append(
                 {
                     "key": key,
                     "origin": origin,
                     "destination": dest,
                     "currency": currency,
-                    "price": best_price,
+                    "price": price_compat,            # compat p/ scheduler/report antigo
+                    "price_base": best_price_base,     # ✅ sem taxas
+                    "price_total": best_price_total,   # ✅ com taxas
                     "best_dep": best_dep,
                     "best_ret": best_ret,
-                    "by_carrier": by_carrier,
+                    "by_carrier": by_carrier,          # menor TOTAL por carrier
                     "summary": (
                         f"{origin}→{dest} best_dep={best_dep} best_ret={best_ret} "
-                        f"cabin={travel_class} A={adults} C={children}"
+                        f"cabin={travel_class} A={adults} C={children} rank_by={rank_by} "
+                        f"base={best_price_base} total={best_price_total}"
                     ),
                 }
             )
