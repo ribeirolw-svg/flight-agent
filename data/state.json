@@ -13,10 +13,24 @@
       "run_id": "20260104T214601Z",
       "ts_utc": "2026-01-04T21:46:55.687495+00:00",
       "summary": "GRU→CIA no offers found dep=2026-09-01..2026-10-05 return<= 2026-10-05"
+    },
+    "GRU-FCO|dep=2026-09-01..2026-10-05|ret<=2026-10-05|class=ECONOMY|A2|C1|BRL": {
+      "price_total": 18212.82,
+      "price": 18212.82,
+      "currency": "BRL",
+      "run_id": "20260111T210856Z",
+      "ts_utc": "2026-01-11T21:08:56.440410+00:00",
+      "best_dep": "2026-09-16",
+      "best_ret": "2026-10-01",
+      "destination": "FCO",
+      "by_carrier": {
+        "AZ": 18212.82
+      },
+      "summary": "GRU→FCO best_dep=2026-09-16 best_ret=2026-10-01 cabin=ECONOMY A=2 C=1"
     }
   },
   "meta": {
-    "previous_run_id": null,
-    "latest_run_id": "20260105T182744Z"
+    "previous_run_id": "20260105T182744Z",
+    "latest_run_id": "20260111T210856Z"
   }
 }
