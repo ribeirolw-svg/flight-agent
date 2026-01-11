@@ -1,11 +1,27 @@
-route:
-  origin: GRU
-  destination: FCO
-  direct_only: true
-  adults: 2
-  children: 1
-  children_ages: [3]
-  cabin: ECONOMY
+routes:
+  - name: Roma
+    origin: GRU
+    destinations: [FCO, CIA]
+    direct_only: true
+    adults: 2
+    children: 1
+    cabin: ECONOMY
+
+  - name: Curitiba
+    origin: GRU
+    destinations: [CWB]
+    direct_only: true
+    adults: 1
+    children: 0
+    cabin: ECONOMY
+
+  - name: Navegantes
+    origin: GRU
+    destinations: [NVT]
+    direct_only: true
+    adults: 1
+    children: 0
+    cabin: ECONOMY
 
 date_rule:
   depart_start: "2026-09-01"
@@ -13,6 +29,4 @@ date_rule:
   trip_length_days: 15
   return_deadline: "2026-10-05"
 
-sources:
-  - amadeus
-  - kiwi
+sources: [amadeus]
