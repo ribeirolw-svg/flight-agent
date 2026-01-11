@@ -1,27 +1,10 @@
-origin_domestic: CGH
-
-routes:
-  - name: Roma
-    origin: GRU
-    destinations: [FCO, CIA]
-    direct_only: true
-    adults: 2
-    children: 1
-    cabin: ECONOMY
-    currency: BRL
-    date_rule:
-      type: fixed
-      depart_start: "2026-09-01"
-      depart_end: "2026-09-20"
-      trip_length_days: 15
-      return_deadline: "2026-10-05"
-
   - name: Curitiba
     domestic: true
     destinations: [CWB]
     direct_only: true
-    adults: 1
-    children: 0
+    adults: 2
+    children: 1
+    children_ages: [3]   # opcional (documentação/uso futuro)
     cabin: ECONOMY
     currency: BRL
     date_rule:
@@ -34,8 +17,9 @@ routes:
     domestic: true
     destinations: [NVT]
     direct_only: true
-    adults: 1
-    children: 0
+    adults: 2
+    children: 1
+    children_ages: [3]   # opcional
     cabin: ECONOMY
     currency: BRL
     date_rule:
@@ -43,5 +27,3 @@ routes:
       lookahead_days: 30
       depart_dows: [FRI, SAT]
       return_dows: [SUN, MON]
-
-sources: [amadeus]
