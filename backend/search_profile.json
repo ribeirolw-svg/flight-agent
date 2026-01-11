@@ -1,28 +1,14 @@
 {
-  "routes": [
-    {
-      "origin": "GRU",
-      "destination": "FCO",
-      "departure_window": { "from": "2026-09-01", "to": "2026-10-05" },
-      "return_latest": "2026-10-05",
-      "return_offsets_days": [10],
-      "departure_step_days": 7,
-      "cabin": "ECONOMY",
-      "adults": 2,
-      "children": 1,
-      "currency": "BRL"
-    },
-    {
-      "origin": "GRU",
-      "destination": "CIA",
-      "departure_window": { "from": "2026-09-01", "to": "2026-10-05" },
-      "return_latest": "2026-10-05",
-      "return_offsets_days": [10],
-      "departure_step_days": 7,
-      "cabin": "ECONOMY",
-      "adults": 2,
-      "children": 1,
-      "currency": "BRL"
-    }
-  ]
+  "origin": "GRU",
+  "destinations": ["FCO", "CIA"],
+  "dep_start": "2026-09-01",
+  "dep_end": "2026-10-05",
+  "return_by": "2026-10-05",
+  "adults": 2,
+  "children": 1,
+  "travelClass": "ECONOMY",
+  "currencyCode": "BRL",
+  "dep_step_days": 7,
+  "ret_offset_days": 10,
+  "rank_by": "total"
 }
