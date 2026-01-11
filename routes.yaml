@@ -1,3 +1,5 @@
+origin_domestic: CGH
+
 routes:
   - name: Roma
     origin: GRU
@@ -15,7 +17,7 @@ routes:
       return_deadline: "2026-10-05"
 
   - name: Curitiba
-    origin: GRU
+    domestic: true
     destinations: [CWB]
     direct_only: true
     adults: 1
@@ -29,7 +31,7 @@ routes:
       return_dows: [SUN, MON]
 
   - name: Navegantes
-    origin: GRU
+    domestic: true
     destinations: [NVT]
     direct_only: true
     adults: 1
