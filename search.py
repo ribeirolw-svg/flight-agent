@@ -17,9 +17,13 @@ AMADEUS_BASE = "https://test.api.amadeus.com" if AMADEUS_ENV == "test" else "htt
 
 CLIENT_ID = os.getenv("AMADEUS_CLIENT_ID")
 CLIENT_SECRET = os.getenv("AMADEUS_CLIENT_SECRET")
+
 DEFAULT_CURRENCY = os.getenv("CURRENCY_CODE", "BRL")
 
 
+# ----------------------------
+# Utils
+# ----------------------------
 def _require_secrets() -> None:
     if not CLIENT_ID or not CLIENT_SECRET:
         raise RuntimeError("AMADEUS_CLIENT_ID / AMADEUS_CLIENT_SECRET não configurados.")
@@ -47,6 +51,12 @@ def _daterange(start: date, end: date, step_days: int) -> List[date]:
     return out
 
 
+def _min_update(d: Dict[str, float], k: str, v: float) -> None:
+    cur = d.get(k)
+    if cur is None or v < cur:
+        d[k] = v
+
+
 def _carrier_from_offer(offer: Dict[str, Any]) -> Optional[str]:
     codes = offer.get("validatingAirlineCodes")
     if isinstance(codes, list) and codes:
@@ -60,10 +70,11 @@ def _carrier_from_offer(offer: Dict[str, Any]) -> Optional[str]:
 def _extract_prices(offer: Dict[str, Any]) -> Tuple[Optional[float], Optional[float]]:
     """
     (base, total)
-    base: price.base (sem taxas)
-    total: price.grandTotal (com taxas) ou price.total
+      base  = sem taxas (price.base)
+      total = com taxas (price.grandTotal) ou fallback (price.total)
     """
     price_obj = offer.get("price") or {}
+
     base = _to_float(price_obj.get("base"))
     total = _to_float(price_obj.get("grandTotal"))
     if total is None:
@@ -74,13 +85,8 @@ def _extract_prices(offer: Dict[str, Any]) -> Tuple[Optional[float], Optional[fl
         base = total
     if total is None and base is not None:
         total = base
+
     return base, total
-
-
-def _min_update(d: Dict[str, float], k: str, v: float) -> None:
-    cur = d.get(k)
-    if cur is None or v < cur:
-        d[k] = v
 
 
 # ----------------------------
@@ -120,11 +126,20 @@ class AmadeusClient:
 
 
 # ----------------------------
-# Profile normalization
+# Profile normalization (robusto)
 # ----------------------------
+def _pick_first(p: Dict[str, Any], keys: List[str]) -> Optional[Any]:
+    for k in keys:
+        v = p.get(k)
+        if v is not None and str(v).strip() != "":
+            return v
+    return None
+
+
 def _normalize_profile(profile: Dict[str, Any]) -> Dict[str, Any]:
     p = dict(profile or {})
 
+    # defaults
     p.setdefault("origin", "GRU")
     p.setdefault("destinations", ["FCO", "CIA"])
     p.setdefault("travelClass", "ECONOMY")
@@ -132,18 +147,17 @@ def _normalize_profile(profile: Dict[str, Any]) -> Dict[str, Any]:
     p.setdefault("adults", 2)
     p.setdefault("children", 1)
 
-    # aliases
+    # aliases comuns
     if "currency" in p and "currencyCode" not in p:
         p["currencyCode"] = p["currency"]
     if "class" in p and "travelClass" not in p:
         p["travelClass"] = p["class"]
 
-    # ✅ PONTO 1: children (2–11) sempre; nunca enviar infants
-    p.pop("infants", None)
-    p.pop("infant", None)
-    p.pop("child_age", None)
-    p.pop("children_ages", None)
+    # ✅ criança 2–11: sempre children; nunca infants
+    for k in ("infants", "infant", "child_age", "children_ages"):
+        p.pop(k, None)
 
+    # ints
     p["adults"] = int(p.get("adults") or 0)
     p["children"] = int(p.get("children") or 0)
     if p["adults"] <= 0:
@@ -151,161 +165,69 @@ def _normalize_profile(profile: Dict[str, Any]) -> Dict[str, Any]:
     if p["children"] < 0:
         raise ValueError("Profile inválido: children não pode ser negativo.")
 
-    dep_start = p.get("dep_start") or p.get("departure_from") or p.get("departure_start")
-    dep_end = p.get("dep_end") or p.get("departure_to") or p.get("departure_end")
-    return_by = p.get("return_by") or p.get("return_limit")
+    # ✅ datas com vários aliases (melhor solução para você agora)
+    dep_start = _pick_first(
+        p,
+        [
+            "dep_start",
+            "depart_start",
+            "departure_from",
+            "departure_start",
+            "departure_window_start",
+            "departureWindowStart",
+            "date_from",
+            "from_date",
+        ],
+    )
+    dep_end = _pick_first(
+        p,
+        [
+            "dep_end",
+            "depart_end",
+            "departure_to",
+            "departure_end",
+            "departure_window_end",
+            "departureWindowEnd",
+            "date_to",
+            "to_date",
+        ],
+    )
+    return_by = _pick_first(
+        p,
+        [
+            "return_by",
+            "return_limit",
+            "return_latest",
+            "return_max",
+            "returnDateLimit",
+            "return_by_limit",
+            "returnUntil",
+            "return_until",
+            "return_deadline",
+        ],
+    )
 
     if not dep_start or not dep_end or not return_by:
-        raise ValueError("Profile inválido: informe dep_start/dep_end/return_by (YYYY-MM-DD).")
+        raise ValueError(
+            "Profile inválido: informe dep_start/dep_end/return_by (YYYY-MM-DD). "
+            "Aceitos também: departure_from/departure_to/return_limit, "
+            "departure_window_start/departure_window_end/returnDateLimit."
+        )
 
     p["_dep_start"] = _parse_iso_date(str(dep_start))
     p["_dep_end"] = _parse_iso_date(str(dep_end))
     p["_return_by"] = _parse_iso_date(str(return_by))
 
-    p["dep_step_days"] = int(p.get("dep_step_days") or p.get("depStep") or 7)
-    p["ret_offset_days"] = int(p.get("ret_offset_days") or p.get("retOff") or 10)
+    # steps
+    p["dep_step_days"] = int(_pick_first(p, ["dep_step_days", "depStep", "departure_step_days"]) or 7)
+    p["ret_offset_days"] = int(_pick_first(p, ["ret_offset_days", "retOff", "return_offset_days"]) or 10)
 
-    # ranking: total por padrão
-    p["rank_by"] = str(p.get("rank_by") or "total").lower()  # total|base
+    # ranking
+    rank_by = str(_pick_first(p, ["rank_by", "rank", "rankBy"]) or "total").lower()
+    p["rank_by"] = "base" if rank_by == "base" else "total"
 
     return p
 
 
 # ----------------------------
-# ✅ EXPORT PRINCIPAL (scheduler importa isso)
-# ----------------------------
-def run_search(profile: Dict[str, Any]) -> List[Dict[str, Any]]:
-    """
-    Retorna lista de dicts compatível com scheduler.py:
-      key, origin, destination, currency,
-      price (compat), price_base, price_total,
-      best_dep, best_ret, by_carrier, summary
-    """
-    p = _normalize_profile(profile)
-    client = AmadeusClient()
-
-    origin = str(p["origin"]).upper()
-    destinations = [str(x).upper() for x in (p.get("destinations") or ["FCO", "CIA"])]
-
-    dep_dates = _daterange(p["_dep_start"], p["_dep_end"], p["dep_step_days"])
-    return_by: date = p["_return_by"]
-    ret_offset = p["ret_offset_days"]
-
-    adults = int(p["adults"])
-    children = int(p["children"])
-    travel_class = str(p["travelClass"]).upper()
-    currency = str(p["currencyCode"]).upper()
-    rank_by = p["rank_by"]
-
-    results: List[Dict[str, Any]] = []
-
-    for dest in destinations:
-        offers_found = False
-
-        best_rank: Optional[float] = None
-        best_base: Optional[float] = None
-        best_total: Optional[float] = None
-        best_dep: Optional[str] = None
-        best_ret: Optional[str] = None
-        by_carrier: Dict[str, float] = {}
-
-        for dep in dep_dates:
-            ret = dep + timedelta(days=ret_offset)
-            if ret > return_by:
-                ret = return_by
-
-            params: Dict[str, Any] = {
-                "originLocationCode": origin,
-                "destinationLocationCode": dest,
-                "departureDate": dep.isoformat(),
-                "returnDate": ret.isoformat(),
-                "adults": adults,
-                "children": children,  # ✅ criança 2–11
-                "travelClass": travel_class,
-                "currencyCode": currency,
-                "max": 20,
-            }
-
-            data = client.flight_offers_search(params)
-            offers = data.get("data") or []
-            if not offers:
-                continue
-
-            offers_found = True
-
-            for offer in offers:
-                base, total = _extract_prices(offer)
-                rank = total if rank_by == "total" else base
-                if rank is None:
-                    rank = total or base
-                if rank is None:
-                    continue
-
-                carrier = _carrier_from_offer(offer) or "??"
-                if total is not None:
-                    _min_update(by_carrier, carrier, total)
-                else:
-                    _min_update(by_carrier, carrier, rank)
-
-                if best_rank is None or rank < best_rank:
-                    best_rank = rank
-                    best_base = base
-                    best_total = total
-                    best_dep = dep.isoformat()
-                    best_ret = ret.isoformat()
-
-        key = (
-            f"{origin}-{dest}"
-            f"|dep={p['_dep_start'].isoformat()}..{p['_dep_end'].isoformat()}"
-            f"|ret<={return_by.isoformat()}"
-            f"|class={travel_class}"
-            f"|A{adults}|C{children}|{currency}"
-            f"|depStep={p['dep_step_days']}|retOff={ret_offset}"
-            f"|rank={rank_by}"
-        )
-
-        if not offers_found:
-            results.append(
-                {
-                    "key": key,
-                    "origin": origin,
-                    "destination": dest,
-                    "currency": currency,
-                    "price": None,
-                    "price_base": None,
-                    "price_total": None,
-                    "best_dep": None,
-                    "best_ret": None,
-                    "by_carrier": {},
-                    "summary": (
-                        f"{origin}→{dest} no offers found dep={p['_dep_start'].isoformat()}..{p['_dep_end'].isoformat()} "
-                        f"return<= {return_by.isoformat()}"
-                    ),
-                }
-            )
-        else:
-            price_compat = best_total if rank_by == "total" else best_base
-            if price_compat is None:
-                price_compat = best_rank
-
-            results.append(
-                {
-                    "key": key,
-                    "origin": origin,
-                    "destination": dest,
-                    "currency": currency,
-                    "price": price_compat,
-                    "price_base": best_base,
-                    "price_total": best_total,
-                    "best_dep": best_dep,
-                    "best_ret": best_ret,
-                    "by_carrier": by_carrier,
-                    "summary": (
-                        f"{origin}→{dest} best_dep={best_dep} best_ret={best_ret} "
-                        f"cabin={travel_class} A={adults} C={children} rank_by={rank_by} "
-                        f"base={best_base} total={best_total}"
-                    ),
-                }
-            )
-
-    return results
+# ✅ Export principal (
