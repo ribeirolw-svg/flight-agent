@@ -1,77 +1,136 @@
+from __future__ import annotations
+
 import os
+import time
 import requests
 from datetime import datetime, timezone
-from typing import Tuple, Dict, Any, Optional
+from typing import Any, Dict, Optional, Tuple
 
-# ==========================================
-# Ambiente (test vs prod)
-# ==========================================
-AMADEUS_ENV = os.getenv("AMADEUS_ENV", "test").lower().strip()
 
-BASE_URL = "https://api.amadeus.com" if AMADEUS_ENV == "prod" else "https://test.api.amadeus.com"
+# -----------------------------
+# Env / Config
+# -----------------------------
+def _env(name: str, default: str = "") -> str:
+    return str(os.getenv(name, default) or "").strip()
+
+
+def _as_int(name: str, default: int) -> int:
+    try:
+        return int(_env(name, str(default)))
+    except Exception:
+        return default
+
+
+def _as_float(name: str, default: float) -> float:
+    try:
+        return float(_env(name, str(default)))
+    except Exception:
+        return default
+
+
+AMADEUS_ENV = _env("AMADEUS_ENV", "test").lower()
+IS_PROD = AMADEUS_ENV in {"prod", "production", "live"}
+
+BASE_URL = "https://api.amadeus.com" if IS_PROD else "https://test.api.amadeus.com"
 TOKEN_URL = f"{BASE_URL}/v1/security/oauth2/token"
 FLIGHT_OFFERS_URL = f"{BASE_URL}/v2/shopping/flight-offers"
 
-# ==========================================
-# Modo TEMP (opcional; só pra teste rápido)
-# Se preencher AMADEUS_TEMP_CLIENT_ID/SECRET no ambiente,
-# eles têm prioridade.
-# ==========================================
-TEMP_CLIENT_ID = os.getenv("AMADEUS_TEMP_CLIENT_ID", "").strip()
-TEMP_CLIENT_SECRET = os.getenv("AMADEUS_TEMP_CLIENT_SECRET", "").strip()
+CLIENT_ID = _env("AMADEUS_CLIENT_ID", "")
+CLIENT_SECRET = _env("AMADEUS_CLIENT_SECRET", "")
+
+MAX_RETRIES = _as_int("AMADEUS_MAX_RETRIES", 5)
+BACKOFF_BASE = _as_float("AMADEUS_BACKOFF_BASE_SECONDS", 1.2)
+THROTTLE_SECONDS = _as_float("AMADEUS_THROTTLE_SECONDS", 0.35)
+TIMEOUT_SECONDS = _as_float("AMADEUS_TIMEOUT_SECONDS", 30.0)
 
 
-def _debug_banner(client_id: str) -> None:
-    # Não imprime segredo, só prefixo
-    print("=======================================")
-    print("AMAD_RUN_UTC:", datetime.now(timezone.utc).isoformat())
-    print("AMAD_ENV:", AMADEUS_ENV)
-    print("AMAD_BASE_URL:", BASE_URL)
-    print("AMAD_CLIENT_ID_PREFIX:", (client_id[:6] if client_id else "—"))
-    print("=======================================")
+# -----------------------------
+# Token cache
+# -----------------------------
+_token_cache: Dict[str, Any] = {
+    "access_token": None,
+    "expires_at_epoch": 0.0,  # epoch seconds
+}
 
 
-def get_amadeus_creds() -> Tuple[str, str]:
-    """
-    Ordem de prioridade:
-    1) AMADEUS_TEMP_CLIENT_ID / AMADEUS_TEMP_CLIENT_SECRET (se existirem)
-    2) AMADEUS_CLIENT_ID / AMADEUS_CLIENT_SECRET (padrão do seu Actions)
-    3) AMADEUS_CLIENT_ID_TEST/PROD e AMADEUS_CLIENT_SECRET_TEST/PROD (fallback)
-    """
-    if TEMP_CLIENT_ID and TEMP_CLIENT_SECRET:
-        return TEMP_CLIENT_ID, TEMP_CLIENT_SECRET
-
-    if "AMADEUS_CLIENT_ID" in os.environ and "AMADEUS_CLIENT_SECRET" in os.environ:
-        return os.environ["AMADEUS_CLIENT_ID"], os.environ["AMADEUS_CLIENT_SECRET"]
-
-    if AMADEUS_ENV == "prod":
-        return os.environ["AMADEUS_CLIENT_ID_PROD"], os.environ["AMADEUS_CLIENT_SECRET_PROD"]
-
-    return os.environ["AMADEUS_CLIENT_ID_TEST"], os.environ["AMADEUS_CLIENT_SECRET_TEST"]
+def _now_epoch() -> float:
+    return time.time()
 
 
-def amadeus_get_token(client_id: str, client_secret: str) -> str:
+def _token_valid() -> bool:
+    tok = _token_cache.get("access_token")
+    exp = float(_token_cache.get("expires_at_epoch") or 0.0)
+    # margem de segurança (30s)
+    return bool(tok) and (_now_epoch() < (exp - 30.0))
+
+
+def _amadeus_get_token() -> str:
+    if _token_valid():
+        return str(_token_cache["access_token"])
+
+    if not CLIENT_ID or not CLIENT_SECRET:
+        raise RuntimeError(
+            "Credenciais Amadeus ausentes. Defina AMADEUS_CLIENT_ID e AMADEUS_CLIENT_SECRET como secrets/env vars."
+        )
+
     resp = requests.post(
         TOKEN_URL,
         data={
             "grant_type": "client_credentials",
-            "client_id": client_id,
-            "client_secret": client_secret,
+            "client_id": CLIENT_ID,
+            "client_secret": CLIENT_SECRET,
         },
-        timeout=30,
+        timeout=TIMEOUT_SECONDS,
     )
 
     if resp.status_code >= 400:
-        raise RuntimeError(f"Erro ao obter token Amadeus ({resp.status_code}): {resp.text}")
+        raise RuntimeError(f"Erro ao obter token ({resp.status_code}): {resp.text}")
 
-    j = resp.json()
-    token = j.get("access_token")
-    if not token:
-        raise RuntimeError(f"Token não encontrado na resposta Amadeus: {j}")
-    return token
+    payload = resp.json()
+    access_token = payload.get("access_token")
+    expires_in = payload.get("expires_in", 0)
+
+    if not access_token:
+        raise RuntimeError(f"Token inválido/ausente na resposta: {payload}")
+
+    _token_cache["access_token"] = access_token
+    _token_cache["expires_at_epoch"] = _now_epoch() + float(expires_in or 0)
+
+    return str(access_token)
 
 
+# -----------------------------
+# Retry helpers
+# -----------------------------
+def _is_rate_limit(resp: Optional[requests.Response], err: Optional[Exception]) -> bool:
+    if resp is not None and resp.status_code == 429:
+        return True
+    if err is not None:
+        s = str(err).lower()
+        return ("429" in s) or ("too many requests" in s) or ("rate limit" in s)
+    return False
+
+
+def _is_transient(resp: Optional[requests.Response], err: Optional[Exception]) -> bool:
+    if resp is not None and resp.status_code in {429, 500, 502, 503, 504}:
+        return True
+    if err is not None:
+        s = str(err).lower()
+        return any(x in s for x in ["timeout", "timed out", "connection", "temporarily", "reset", "429"])
+    return False
+
+
+def _sleep_backoff(attempt: int) -> None:
+    # backoff exponencial leve: base^(attempt+1)
+    wait = BACKOFF_BASE * (BACKOFF_BASE ** attempt)
+    time.sleep(wait)
+
+
+# -----------------------------
+# Public API
+# -----------------------------
 def search_flights(
+    *,
     origin: str,
     destination: str,
     departure_date: str,
@@ -81,63 +140,87 @@ def search_flights(
     travel_class: str = "ECONOMY",
     currency: str = "BRL",
     nonstop: bool = True,
-    max_results: int = 10,
+    max_results: int = 5,
 ) -> Dict[str, Any]:
     """
-    Busca ofertas de voo via Amadeus Flight Offers Search.
-
-    departure_date / return_date: 'YYYY-MM-DD'
-    travel_class: ECONOMY | PREMIUM_ECONOMY | BUSINESS | FIRST
+    Wrapper do Amadeus Flight Offers Search (v2).
+    Observação: este endpoint aceita quantidade de children, mas não aceita idade da criança.
     """
-    client_id, client_secret = get_amadeus_creds()
-    _debug_banner(client_id)
 
-    token = amadeus_get_token(client_id, client_secret)
-
-    headers = {"Authorization": f"Bearer {token}"}
+    # Debug leve (sem vazar secrets)
+    print("=======================================")
+    print("AMAD_RUN_UTC:", datetime.now(timezone.utc).isoformat())
+    print("AMAD_ENV:", AMADEUS_ENV)
+    print("AMAD_BASE_URL:", BASE_URL)
+    print("AMAD_CLIENT_ID_PREFIX:", (CLIENT_ID[:6] if CLIENT_ID else "EMPTY"))
+    print("=======================================")
 
     params: Dict[str, Any] = {
         "originLocationCode": origin,
         "destinationLocationCode": destination,
         "departureDate": departure_date,
         "adults": int(adults),
-        "children": int(children),
-        "travelClass": travel_class,
         "currencyCode": currency,
         "nonStop": "true" if nonstop else "false",
         "max": int(max_results),
+        "travelClass": travel_class,
     }
 
-    # round-trip (se aplicável)
+    if children and int(children) > 0:
+        params["children"] = int(children)
+
     if return_date:
         params["returnDate"] = return_date
 
-    resp = requests.get(
-        FLIGHT_OFFERS_URL,
-        headers=headers,
-        params=params,
-        timeout=30,
-    )
+    last_err: Optional[Exception] = None
+    last_resp: Optional[requests.Response] = None
 
-    if resp.status_code >= 400:
-        raise RuntimeError(f"Erro ao buscar ofertas ({resp.status_code}): {resp.text}")
+    for attempt in range(MAX_RETRIES + 1):
+        if THROTTLE_SECONDS > 0:
+            time.sleep(THROTTLE_SECONDS)
 
-    return resp.json()
+        try:
+            token = _amadeus_get_token()
+            headers = {"Authorization": f"Bearer {token}"}
 
+            resp = requests.get(
+                FLIGHT_OFFERS_URL,
+                headers=headers,
+                params=params,
+                timeout=TIMEOUT_SECONDS,
+            )
+            last_resp = resp
 
-if __name__ == "__main__":
-    # teste local rápido (não precisa rodar em produção)
-    # Ajuste as datas se quiser.
-    data = search_flights(
-        origin="GRU",
-        destination="FCO",
-        departure_date="2026-09-01",
-        return_date="2026-09-11",
-        adults=2,
-        children=1,
-        travel_class="ECONOMY",
-        currency="BRL",
-        nonstop=True,
-        max_results=5,
-    )
-    print("OK - resposta possui chaves:", list(data.keys()))
+            if resp.status_code < 400:
+                return resp.json()
+
+            # 401/403 pode ser token ruim -> limpa cache e tenta de novo 1x
+            if resp.status_code in {401, 403}:
+                _token_cache["access_token"] = None
+                _token_cache["expires_at_epoch"] = 0.0
+
+            # Se é transitório, tenta de novo com backoff
+            if attempt < MAX_RETRIES and _is_transient(resp, None):
+                print(f"[WARN] Amadeus HTTP {resp.status_code} (attempt {attempt+1}/{MAX_RETRIES}) -> retry/backoff")
+                _sleep_backoff(attempt)
+                continue
+
+            raise RuntimeError(f"Erro ao buscar ofertas ({resp.status_code}): {resp.text}")
+
+        except Exception as e:
+            last_err = e
+
+            if attempt < MAX_RETRIES and _is_transient(None, e):
+                print(f"[WARN] Amadeus exception (attempt {attempt+1}/{MAX_RETRIES}) -> retry/backoff | {e}")
+                _sleep_backoff(attempt)
+                continue
+
+            # sem retry
+            raise
+
+    # fallback (não deve acontecer)
+    if last_resp is not None:
+        raise RuntimeError(f"Erro ao buscar ofertas ({last_resp.status_code}): {last_resp.text}")
+    if last_err is not None:
+        raise last_err
+    raise RuntimeError("Erro desconhecido ao buscar ofertas")
