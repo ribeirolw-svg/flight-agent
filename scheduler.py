@@ -1,5 +1,6 @@
 import os
 import json
+import time
 import yaml
 from datetime import datetime, timezone, date, timedelta
 from typing import Dict, Any, List, Tuple, Optional
@@ -73,6 +74,17 @@ def pick_price_total(offer: Dict[str, Any]) -> Optional[float]:
         return None
 
 
+def is_rate_limit_error(e: Exception) -> bool:
+    s = str(e)
+    return ("429" in s) or ("Too many requests" in s) or ("rate limit" in s.lower())
+
+
+def is_transient_error(e: Exception) -> bool:
+    # além de 429, trate 5xx e erros de rede como transitórios
+    s = str(e)
+    return is_rate_limit_error(e) or any(code in s for code in ["500", "502", "503", "504", "timeout", "Timed out"])
+
+
 # -----------------------------
 # Date rules
 # -----------------------------
@@ -95,7 +107,6 @@ def build_pairs_rolling_weekend(rule: Dict[str, Any], today: date) -> List[Tuple
     dep_dows = [DOW[x] for x in (rule.get("depart_dows") or ["FRI", "SAT"])]
     ret_dows = [DOW[x] for x in (rule.get("return_dows") or ["SUN", "MON"])]
 
-    # Opcional: limitar duração
     min_stay = int(rule.get("min_stay_days", 1))
     max_stay = int(rule.get("max_stay_days", 7))
 
@@ -106,7 +117,6 @@ def build_pairs_rolling_weekend(rule: Dict[str, Any], today: date) -> List[Tuple
     for dep in daterange(start, end):
         if dep.weekday() not in dep_dows:
             continue
-
         for delta in range(min_stay, max_stay + 1):
             ret = dep + timedelta(days=delta)
             if ret > end:
@@ -114,7 +124,6 @@ def build_pairs_rolling_weekend(rule: Dict[str, Any], today: date) -> List[Tuple
             if ret.weekday() in ret_dows:
                 pairs.append((dep.isoformat(), ret.isoformat()))
 
-    # evita explosão
     max_pairs = int(rule.get("max_pairs", 120))
     return pairs[:max_pairs]
 
@@ -168,6 +177,58 @@ def route_key(route_name: str, origin: str, destination: str, cabin: str, adults
     return f"{route_name}|{origin}-{destination}|{rule_type}|class={cabin}|A{adults}|C{children}|{currency}"
 
 
+def search_flights_with_retry(
+    *,
+    origin: str,
+    destination: str,
+    departure_date: str,
+    return_date: str,
+    adults: int,
+    children: int,
+    travel_class: str,
+    currency: str,
+    nonstop: bool,
+    max_results: int,
+) -> Dict[str, Any]:
+    max_retries = int(os.getenv("AMADEUS_MAX_RETRIES", "5"))
+    backoff_base = float(os.getenv("AMADEUS_BACKOFF_BASE_SECONDS", "1.2"))
+    throttle = float(os.getenv("AMADEUS_THROTTLE_SECONDS", "0.5"))
+
+    last_err: Optional[Exception] = None
+
+    for attempt in range(max_retries + 1):
+        if throttle > 0:
+            time.sleep(throttle)
+
+        try:
+            return search_flights(
+                origin=origin,
+                destination=destination,
+                departure_date=departure_date,
+                return_date=return_date,
+                adults=adults,
+                children=children,
+                travel_class=travel_class,
+                currency=currency,
+                nonstop=nonstop,
+                max_results=max_results,
+            )
+        except Exception as e:
+            last_err = e
+            if attempt >= max_retries or not is_transient_error(e):
+                raise
+
+            # backoff exponencial leve (1.2^attempt)
+            sleep_s = backoff_base * (backoff_base ** attempt)
+            print(f"[WARN] transient error (attempt {attempt+1}/{max_retries}) -> sleeping {sleep_s:.2f}s | {e}")
+            time.sleep(sleep_s)
+
+    # não deve chegar aqui
+    if last_err:
+        raise last_err
+    raise RuntimeError("search_flights_with_retry: erro desconhecido")
+
+
 def run_for_destination(
     origin: str,
     destination: str,
@@ -188,55 +249,76 @@ def run_for_destination(
     max_results = int(os.getenv("AMADEUS_MAX_RESULTS", "10"))
 
     for dep, ret in pairs:
-        raw = search_flights(
-            origin=origin,
-            destination=destination,
-            departure_date=dep,
-            return_date=ret,
-            adults=adults,
-            children=children,
-            travel_class=cabin,
-            currency=currency,
-            nonstop=direct_only,
-            max_results=max_results,
-        )
+        try:
+            raw = search_flights_with_retry(
+                origin=origin,
+                destination=destination,
+                departure_date=dep,
+                return_date=ret,
+                adults=adults,
+                children=children,
+                travel_class=cabin,
+                currency=currency,
+                nonstop=direct_only,
+                max_results=max_results,
+            )
+            offers = raw.get("data", []) or []
 
-        offers = raw.get("data", []) or []
+            append_jsonl(HISTORY_PATH, {
+                "run_id": run_id,
+                "ts_utc": ts_utc,
+                "origin": origin,
+                "destination": destination,
+                "departure_date": dep,
+                "return_date": ret,
+                "offers_count": len(offers),
+                "adults": adults,
+                "children": children,
+                "cabin": cabin,
+                "currency": currency,
+                "direct_only": direct_only,
+                "error": None,
+            })
 
-        append_jsonl(HISTORY_PATH, {
-            "run_id": run_id,
-            "ts_utc": ts_utc,
-            "origin": origin,
-            "destination": destination,
-            "departure_date": dep,
-            "return_date": ret,
-            "offers_count": len(offers),
-            "adults": adults,
-            "children": children,
-            "cabin": cabin,
-            "currency": currency,
-            "direct_only": direct_only,
-        })
+            for offer in offers:
+                price = pick_price_total(offer)
+                if price is None:
+                    continue
 
-        for offer in offers:
-            price = pick_price_total(offer)
-            if price is None:
-                continue
+                validating = offer.get("validatingAirlineCodes")
+                carrier = validating[0] if isinstance(validating, list) and validating else "—"
 
-            validating = offer.get("validatingAirlineCodes")
-            carrier = validating[0] if isinstance(validating, list) and validating else "—"
+                if carrier != "—":
+                    cur = by_carrier_best.get(carrier)
+                    if cur is None or price < cur:
+                        by_carrier_best[carrier] = price
 
-            if carrier != "—":
-                cur = by_carrier_best.get(carrier)
-                if cur is None or price < cur:
-                    by_carrier_best[carrier] = price
+                if best_price_run is None or price < best_price_run:
+                    best_price_run = price
+                    best_dep_run = dep
+                    best_ret_run = ret
 
-            if best_price_run is None or price < best_price_run:
-                best_price_run = price
-                best_dep_run = dep
-                best_ret_run = ret
+            print(f"[OK] {origin}->{destination} {dep}->{ret} offers={len(offers)}")
 
-        print(f"[OK] {origin}->{destination} {dep}->{ret} offers={len(offers)}")
+        except Exception as e:
+            # NÃO derruba o workflow: registra e segue
+            append_jsonl(HISTORY_PATH, {
+                "run_id": run_id,
+                "ts_utc": ts_utc,
+                "origin": origin,
+                "destination": destination,
+                "departure_date": dep,
+                "return_date": ret,
+                "offers_count": None,
+                "adults": adults,
+                "children": children,
+                "cabin": cabin,
+                "currency": currency,
+                "direct_only": direct_only,
+                "error": str(e),
+            })
+            print(f"[ERRO] {origin}->{destination} {dep}->{ret} | {e}")
+            continue
 
     return best_price_run, best_dep_run, best_ret_run, by_carrier_best
 
@@ -284,7 +366,6 @@ def main() -> None:
         route_name = merged_str(route_cfg, defaults, "name", "Route")
         is_domestic = bool(route_cfg.get("domestic", False))
 
-        # Origem: domestic usa origin_domestic; internacional usa origin explícito (ou default GRU)
         origin = origin_domestic if is_domestic else merged_str(route_cfg, defaults, "origin", "GRU").upper()
         origin = origin.strip().upper()
 
@@ -297,7 +378,6 @@ def main() -> None:
         cabin = merged_str(route_cfg, defaults, "cabin", "ECONOMY").upper()
         currency = merged_str(route_cfg, defaults, "currency", "BRL").upper()
 
-        # child ages: metadado (endpoint não usa), mas guardamos no summary/state
         children_ages = merged_list(route_cfg, defaults, "children_ages")
 
         pairs = build_pairs_for_route(route_cfg, today=today)
