@@ -1,11 +1,12 @@
-# Flight Agent — Weekly Summary
+# Flight Agent — Daily Summary
 
-- Updated: **2026-01-11 21:09 UTC**
-- Latest run_id: `20260111T210856Z`
-- Previous run_id: `20260105T182744Z`
+- Updated: **2026-01-11 22:07 UTC**
+- Latest run_id: `20260111T220516Z`
+- Previous run_id: `20260111T210856Z`
 
-## Headline — GRU → FCO
+## Headline
 
-- **Best this run:** GRU→FCO — **BRL 18,212.82**
-- Dates: depart **2026-09-16** · return **2026-10-01**
-- Key: `GRU-FCO|dep=2026-09-01..2026-10-05|ret<=2026-10-05|class=ECONOMY|A2|C1|BRL`
+- Roma — GRU→FCO: **BRL 18,212.82** (2026-09-16 → 2026-10-01)
+- Roma — GRU→CIA: **N/A**
+- Curitiba — CGH→CWB: **BRL 780.20** (2026-02-06 → 2026-02-08)
+- Navegantes — CGH→NVT: **BRL 582.67** (2026-01-16 → 2026-01-18)
