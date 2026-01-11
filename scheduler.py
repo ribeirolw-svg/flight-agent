@@ -16,7 +16,6 @@ STATE_PATH = os.path.join(DATA_DIR, "state.json")
 SUMMARY_PATH = os.path.join(DATA_DIR, "summary.md")
 HISTORY_PATH = os.path.join(DATA_DIR, "history.jsonl")
 
-
 DOW = {
     "MON": 0, "TUE": 1, "WED": 2, "THU": 3, "FRI": 4, "SAT": 5, "SUN": 6
 }
@@ -101,7 +100,6 @@ def build_pairs_rolling_weekend(rule: Dict[str, Any], today: date) -> List[Tuple
         if dep.weekday() not in dep_dows:
             continue
 
-        # procura retornos válidos dentro do range de duração
         for delta in range(min_stay, max_stay + 1):
             ret = dep + timedelta(days=delta)
             if ret > end:
@@ -109,7 +107,6 @@ def build_pairs_rolling_weekend(rule: Dict[str, Any], today: date) -> List[Tuple
             if ret.weekday() in ret_dows:
                 pairs.append((dep.isoformat(), ret.isoformat()))
 
-    # evita explosão: se ficar grande demais, você pode cortar
     max_pairs = int(rule.get("max_pairs", 120))
     return pairs[:max_pairs]
 
@@ -138,7 +135,6 @@ def route_key(route_name: str, origin: str, destination: str, route_cfg: Dict[st
     rule = route_cfg.get("date_rule") or {}
     rtype = (rule.get("type") or "fixed").strip().upper()
 
-    # um key “estável” por rota/destino
     return f"{route_name}|{origin}-{destination}|{rtype}|class={cabin}|A{adults}|C{children}|{currency}"
 
 
@@ -226,13 +222,13 @@ def main() -> None:
     if not isinstance(routes, list) or not routes:
         raise ValueError("routes.yaml precisa ter 'routes:' como lista não-vazia")
 
-    # state atual
+    origin_domestic = (cfg.get("origin_domestic") or "CGH").strip().upper()
+
     state = load_json(STATE_PATH, default={"best": {}, "meta": {"previous_run_id": None, "latest_run_id": None}})
     best_map = state.get("best", {}) if isinstance(state.get("best"), dict) else {}
     meta = state.get("meta", {}) if isinstance(state.get("meta"), dict) else {}
     prev_latest = meta.get("latest_run_id")
 
-    # timestamps
     run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     ts_utc = datetime.now(timezone.utc).isoformat()
     today = datetime.now(timezone.utc).date()
@@ -241,6 +237,7 @@ def main() -> None:
     print("RUN_ID:", run_id)
     print("TS_UTC:", ts_utc)
     print("routes_count:", len(routes))
+    print("origin_domestic:", origin_domestic)
     print("sources:", sources)
     print("=======================================")
 
@@ -248,7 +245,14 @@ def main() -> None:
 
     for route_cfg in routes:
         route_name = (route_cfg.get("name") or "Route").strip()
-        origin = (route_cfg.get("origin") or "GRU").strip().upper()
+
+        is_domestic = bool(route_cfg.get("domestic", False))
+        origin = (
+            origin_domestic
+            if is_domestic
+            else (route_cfg.get("origin") or "GRU").strip().upper()
+        )
+
         destinations = route_cfg.get("destinations") or []
         if isinstance(destinations, str):
             destinations = [destinations]
@@ -264,7 +268,7 @@ def main() -> None:
 
         print("---------------------------------------")
         print("ROUTE:", route_name)
-        print("origin:", origin, "| destinations:", destinations)
+        print("origin:", origin, "| destinations:", destinations, "| domestic:", is_domestic)
         print("pairs_count:", len(pairs))
         print("---------------------------------------")
 
