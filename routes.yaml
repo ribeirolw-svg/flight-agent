@@ -6,6 +6,13 @@ routes:
     adults: 2
     children: 1
     cabin: ECONOMY
+    currency: BRL
+    date_rule:
+      type: fixed
+      depart_start: "2026-09-01"
+      depart_end: "2026-09-20"
+      trip_length_days: 15
+      return_deadline: "2026-10-05"
 
   - name: Curitiba
     origin: GRU
@@ -14,6 +21,12 @@ routes:
     adults: 1
     children: 0
     cabin: ECONOMY
+    currency: BRL
+    date_rule:
+      type: rolling_weekend
+      lookahead_days: 30
+      depart_dows: [FRI, SAT]
+      return_dows: [SUN, MON]
 
   - name: Navegantes
     origin: GRU
@@ -22,11 +35,11 @@ routes:
     adults: 1
     children: 0
     cabin: ECONOMY
-
-date_rule:
-  depart_start: "2026-09-01"
-  depart_end: "2026-09-20"
-  trip_length_days: 15
-  return_deadline: "2026-10-05"
+    currency: BRL
+    date_rule:
+      type: rolling_weekend
+      lookahead_days: 30
+      depart_dows: [FRI, SAT]
+      return_dows: [SUN, MON]
 
 sources: [amadeus]
