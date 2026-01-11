@@ -1,20 +1,24 @@
+from __future__ import annotations
+
 import json
 import re
 from pathlib import Path
+from typing import Any, Dict, Optional, Tuple, List
 
 import pandas as pd
 import streamlit as st
+
 
 st.set_page_config(page_title="Flight Agent", layout="wide")
 
 ROOT = Path(__file__).resolve().parents[1]
 DATA_DIR = ROOT / "data"
 
-SUMMARY = DATA_DIR / "summary.md"
-STATE = DATA_DIR / "state.json"
-HISTORY = DATA_DIR / "history.jsonl"
+STATE_PATH = DATA_DIR / "state.json"
+SUMMARY_PATH = DATA_DIR / "summary.md"
+HISTORY_PATH = DATA_DIR / "history.jsonl"
 
-# (opcional) mapeamento simples IATA -> nome, pra ficar mais humano
+
 IATA_AIRLINE_NAMES = {
     "AF": "Air France",
     "LH": "Lufthansa",
@@ -34,40 +38,43 @@ IATA_AIRLINE_NAMES = {
 }
 
 
-# ----------------------------
-# Helpers
-# ----------------------------
-def _load_json(path: Path):
+def carrier_label(code: str) -> str:
+    c = (code or "").strip().upper()
+    if not c:
+        return "—"
+    name = IATA_AIRLINE_NAMES.get(c)
+    return f"{c} ({name})" if name else c
+
+
+def load_json(path: Path, default: Any):
+    if not path.exists():
+        return default
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def _fmt_money(currency: str, price) -> str:
+def load_text(path: Path, default: str = "") -> str:
+    if not path.exists():
+        return default
+    return path.read_text(encoding="utf-8")
+
+
+def to_float(x) -> Optional[float]:
     try:
-        p = float(price)
+        if x is None:
+            return None
+        return float(x)
     except Exception:
+        return None
+
+
+def fmt_money(currency: str, value: Optional[float]) -> str:
+    if value is None:
         return "N/A"
-    if p == float("inf"):
-        return "N/A"
-    return f"{currency} {p:,.2f}"
+    return f"{currency} {value:,.2f}"
 
 
-def _price_num_from_str(s: str) -> float:
-    try:
-        return float(s.split(" ", 1)[1].replace(",", ""))
-    except Exception:
-        return float("inf")
-
-
-def _infer_dest_from_key(key: str) -> str:
-    if key.startswith("GRU-FCO|"):
-        return "FCO"
-    if key.startswith("GRU-CIA|"):
-        return "CIA"
-    return ""
-
-
-def _parse_pax_from_key(key: str) -> str:
-    # key contém ...|A2|C1|...
+def parse_key_pax(key: str) -> str:
+    # ...|A2|C1|...
     m_a = re.search(r"\|A(\d+)\|", key)
     m_c = re.search(r"\|C(\d+)\|", key)
     a = int(m_a.group(1)) if m_a else 0
@@ -80,201 +87,241 @@ def _parse_pax_from_key(key: str) -> str:
     return " · ".join(parts) if parts else "—"
 
 
-def _best_carriers(by_carrier: dict) -> list[tuple[str, float]]:
-    """retorna lista ordenada [(code, price), ...]"""
-    if not isinstance(by_carrier, dict) or not by_carrier:
-        return []
-    rows = []
-    for c, v in by_carrier.items():
-        try:
-            rows.append((str(c), float(v)))
-        except Exception:
-            continue
-    rows.sort(key=lambda x: x[1])
-    return rows
-
-
-def _carrier_label(code: str) -> str:
-    code = (code or "").upper().strip()
-    name = IATA_AIRLINE_NAMES.get(code)
-    return f"{code} ({name})" if name else code
-
-
-def _pick_best_rome_from_state(best_map: dict) -> dict | None:
+def best_price_for_display(info: Dict[str, Any]) -> Tuple[Optional[float], Optional[str]]:
     """
-    best_map: state["best"] dict
-    escolhe o menor preço entre GRU-FCO e GRU-CIA (se houver)
+    retorna (price_total_preferencial, "total|price|base")
     """
-    candidates = []
-    for key, info in (best_map or {}).items():
-        if not (str(key).startswith("GRU-FCO|") or str(key).startswith("GRU-CIA|")):
+    p_total = to_float(info.get("price_total"))
+    if p_total is not None:
+        return p_total, "total"
+    p = to_float(info.get("price"))
+    if p is not None:
+        return p, "price"
+    p_base = to_float(info.get("price_base"))
+    if p_base is not None:
+        return p_base, "base"
+    return None, None
+
+
+def dest_from_key(key: str) -> str:
+    # "GRU-FCO|..." ou "GRU-CIA|..."
+    if key.startswith("GRU-FCO|") or key.startswith("GRU-FCO"):
+        return "FCO"
+    if key.startswith("GRU-CIA|") or key.startswith("GRU-CIA"):
+        return "CIA"
+    return "—"
+
+
+def min_carrier_from_by_carrier(by_carrier: Dict[str, Any]) -> Tuple[str, Optional[float]]:
+    best_code = ""
+    best_price = None
+    if not isinstance(by_carrier, dict):
+        return "—", None
+    for k, v in by_carrier.items():
+        fv = to_float(v)
+        if fv is None:
             continue
-        try:
-            p = float(info.get("price", float("inf")))
-        except Exception:
-            p = float("inf")
-        candidates.append((p, key, info))
+        if best_price is None or fv < best_price:
+            best_price = fv
+            best_code = str(k)
+    return (best_code or "—"), best_price
 
-    if not candidates:
-        return None
 
-    candidates.sort(key=lambda x: x[0])
-    _, key, info = candidates[0]
-    return {"key": key, "info": info}
+def pick_best_rome(best_map: Dict[str, Any]) -> Optional[Tuple[str, Dict[str, Any]]]:
+    # escolhe menor preço entre FCO/CIA
+    best_key = None
+    best_info = None
+    best_val = None
+    for k, info in (best_map or {}).items():
+        if not (k.startswith("GRU-FCO") or k.startswith("GRU-CIA")):
+            continue
+        v, _ = best_price_for_display(info if isinstance(info, dict) else {})
+        if v is None:
+            continue
+        if best_val is None or v < best_val:
+            best_val = v
+            best_key = k
+            best_info = info
+    if best_key and best_info:
+        return best_key, best_info
+    return None
 
 
 # ----------------------------
 # UI
 # ----------------------------
-st.title("✈️ Agente de Voo — Painel de Controle")
+st.title("✈️ Flight Agent — São Paulo ↔ Roma")
 
-top_left, top_right = st.columns([1, 1])
-with top_left:
-    if st.button("🔄 Recarregar agora"):
-        st.rerun()
-with top_right:
-    st.caption(f"📁 Fonte: `{DATA_DIR}`")
+if not DATA_DIR.exists():
+    st.error("Pasta `data/` não existe no repo. Rode o GitHub Actions 1x para gerar os arquivos.")
+    st.stop()
 
-state_best = {}
-if STATE.exists():
-    state = _load_json(STATE)
-    state_best = state.get("best", {}) if isinstance(state.get("best", {}), dict) else {}
+# load state
+state = load_json(STATE_PATH, default={"best": {}, "last_run_id": None})
+best_map = state.get("best", {}) if isinstance(state.get("best", {}), dict) else {}
+last_run = state.get("last_run_id")
 
-# --- KPI Card (Roma) ---
-st.markdown("### 🇮🇹 Roma — Cartão (KPI)")
+top = st.columns([1, 1, 1])
+top[0].metric("Último run_id (state)", last_run or "—")
+top[1].metric("Arquivos em data/", str(len(list(DATA_DIR.glob("*")))))
+top[2].metric("Atualização (summary)", "OK" if SUMMARY_PATH.exists() else "—")
 
-best_rome = _pick_best_rome_from_state(state_best)
+st.divider()
 
-if best_rome:
-    key = str(best_rome["key"])
-    info = best_rome["info"] or {}
+# KPI Card Roma
+st.subheader("🇮🇹 Cartão Roma (melhor preço atual)")
 
-    currency = str(info.get("currency", "BRL") or "BRL")
-    price_txt = _fmt_money(currency, info.get("price"))
+best_rome = pick_best_rome(best_map)
+if not best_rome:
+    st.warning("Ainda não encontrei Roma em `data/state.json` (ou está sem preço).")
+else:
+    key, info = best_rome
+    currency = str(info.get("currency") or "BRL")
+
+    price_val, price_kind = best_price_for_display(info)
+    price_total = to_float(info.get("price_total"))
+    price_base = to_float(info.get("price_base"))
+
+    dep = info.get("best_dep") or "—"
+    ret = info.get("best_ret") or "—"
+    pax = parse_key_pax(key)
+    dest = str(info.get("destination") or dest_from_key(key))
+
+    best_carrier_code, best_carrier_price = min_carrier_from_by_carrier(info.get("by_carrier") or {})
+    best_carrier_txt = carrier_label(best_carrier_code)
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Preço (TOTAL)", fmt_money(currency, price_total if price_total is not None else price_val))
+    c2.metric("Ida", dep)
+    c3.metric("Volta", ret)
+    c4.metric("Cia + barata", best_carrier_txt)
+
+    st.caption(
+        f"Pax: **{pax}** · Destino: **{dest}** · "
+        f"BASE (sem taxas): **{fmt_money(currency, price_base)}** · "
+        f"Key: `{key}`"
+    )
+
+st.divider()
+
+# Table: Destinos FCO/CIA
+st.subheader("📌 Roma — por destino (FCO / CIA)")
+
+rows: List[Dict[str, Any]] = []
+for k, info in best_map.items():
+    if not (k.startswith("GRU-FCO") or k.startswith("GRU-CIA")):
+        continue
+    if not isinstance(info, dict):
+        continue
+
+    currency = str(info.get("currency") or "BRL")
+    dest = str(info.get("destination") or dest_from_key(k))
+    pax = parse_key_pax(k)
+
+    price_total = to_float(info.get("price_total"))
+    price_base = to_float(info.get("price_base"))
+    price_val, _kind = best_price_for_display(info)
 
     dep = info.get("best_dep") or "—"
     ret = info.get("best_ret") or "—"
 
-    dest = info.get("destination") or _infer_dest_from_key(key) or "ROM"
-    pax = _parse_pax_from_key(key)
+    best_carrier_code, best_carrier_price = min_carrier_from_by_carrier(info.get("by_carrier") or {})
+    best_carrier = carrier_label(best_carrier_code)
 
-    carriers = _best_carriers(info.get("by_carrier", {}))
-    best_carrier = _carrier_label(carriers[0][0]) if carriers else "—"
-    top3 = [_carrier_label(c) for (c, _) in carriers[:3]]
+    rows.append(
+        {
+            "Destino": dest,
+            "TOTAL": fmt_money(currency, price_total if price_total is not None else price_val),
+            "BASE": fmt_money(currency, price_base),
+            "Ida": dep,
+            "Volta": ret,
+            "Cia + barata": best_carrier,
+            "Pax": pax,
+            "Notas": info.get("summary", "") or "",
+            "Key": k,
+        }
+    )
 
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Melhor preço", price_txt)
-    c2.metric("Ida", dep)
-    c3.metric("Volta", ret)
-    c4.metric("Cia + barata", best_carrier)
-
-    # contexto (pax/rota)
-    st.caption(f"Rota: **GRU → {dest}**  |  Pax: **{pax}**  |  Classe: **ECONOMY**  |  Key: `{key}`")
-
-    if price_txt != "N/A":
-        st.success("✅ Tem resultado Roma no estado atual (state.json).")
-    else:
-        st.warning("⚠️ Roma está sem preço (N/A) no state.json.")
-
-    if top3:
-        st.caption("Top 3 cias (Roma): " + " · ".join(top3))
-
+if not rows:
+    st.info("Sem entradas GRU→(FCO/CIA) no state ainda.")
 else:
-    st.warning("⚠️ Não achei Roma no state.json ainda (rode o Actions para gerar state/history).")
+    df = pd.DataFrame(rows)
+    # ordenar por destino e preço total
+    def _money_to_num(s: str) -> float:
+        try:
+            if s == "N/A":
+                return 1e18
+            return float(s.split(" ", 1)[1].replace(",", ""))
+        except Exception:
+            return 1e18
+
+    df["_p"] = df["TOTAL"].map(_money_to_num)
+    df = df.sort_values(["Destino", "_p"]).drop(columns=["_p"])
+
+    st.dataframe(
+        df[["Destino", "TOTAL", "BASE", "Ida", "Volta", "Cia + barata", "Pax", "Notas"]],
+        use_container_width=True,
+        hide_index=True,
+    )
+
+    with st.expander("Ver Keys (avançado)"):
+        st.dataframe(df[["Destino", "Key"]], use_container_width=True, hide_index=True)
 
 st.divider()
 
-# --- Current Best table ---
-st.subheader("✅ Current Best (state.json)")
+# Top 5 por companhia (do melhor estado)
+st.subheader("🏷️ Roma — Top 5 por companhia (do state)")
 
-if STATE.exists():
-    best = state_best
+carrier_rows = []
+for k, info in best_map.items():
+    if not isinstance(info, dict):
+        continue
+    if not (k.startswith("GRU-FCO") or k.startswith("GRU-CIA")):
+        continue
+    currency = str(info.get("currency") or "BRL")
+    dest = str(info.get("destination") or dest_from_key(k))
+    by_carrier = info.get("by_carrier") or {}
 
-    rows = []
-    for key, info in (best or {}).items():
-        currency = str(info.get("currency", "BRL") or "BRL")
-        dest = str(info.get("destination") or _infer_dest_from_key(str(key)) or "—")
-        price = info.get("price", None)
-        carriers = _best_carriers(info.get("by_carrier", {}))
-        best_carrier = _carrier_label(carriers[0][0]) if carriers else "—"
+    for code, price in by_carrier.items():
+        pv = to_float(price)
+        if pv is None:
+            continue
+        carrier_rows.append({"Destino": dest, "Airline": carrier_label(str(code)), "Preço (TOTAL)": fmt_money(currency, pv)})
 
-        rows.append(
-            {
-                "Destino": dest,
-                "Melhor preço": _fmt_money(currency, price),
-                "Ida (best_dep)": info.get("best_dep") or "—",
-                "Volta (best_ret)": info.get("best_ret") or "—",
-                "Cia + barata": best_carrier,
-                "Pax": _parse_pax_from_key(str(key)),
-                "Notas": info.get("summary", "") or "",
-                "Key": str(key),
-            }
-        )
+if carrier_rows:
+    cdf = pd.DataFrame(carrier_rows)
+    # rank por destino
+    def _money_to_num2(s: str) -> float:
+        try:
+            return float(s.split(" ", 1)[1].replace(",", ""))
+        except Exception:
+            return 1e18
 
-    if rows:
-        df = pd.DataFrame(rows)
-        df["_p"] = df["Melhor preço"].apply(_price_num_from_str)
-        df = df.sort_values(["Destino", "_p"]).drop(columns=["_p"])
-
-        st.dataframe(
-            df[["Destino", "Melhor preço", "Ida (best_dep)", "Volta (best_ret)", "Cia + barata", "Pax", "Notas"]],
-            use_container_width=True,
-            hide_index=True,
-        )
-
-        with st.expander("Ver keys (avançado)"):
-            st.dataframe(df[["Destino", "Key"]], use_container_width=True, hide_index=True)
-    else:
-        st.info("state.json existe, mas ainda não tem registros em best.")
+    cdf["_p"] = cdf["Preço (TOTAL)"].map(_money_to_num2)
+    cdf = cdf.sort_values(["Destino", "_p"]).drop(columns=["_p"])
+    # top5 por destino
+    out = []
+    for dest, g in cdf.groupby("Destino", sort=False):
+        out.append(g.head(5))
+    cdf2 = pd.concat(out, ignore_index=True)
+    st.dataframe(cdf2, use_container_width=True, hide_index=True)
 else:
-    st.warning("Não encontrei data/state.json no repo.")
+    st.info("Sem by_carrier no state ainda (rode Actions ao menos 1x com ofertas).")
 
 st.divider()
 
-# --- Weekly Summary ---
-st.subheader("📝 Weekly Summary (summary.md)")
-if SUMMARY.exists():
-    st.markdown(SUMMARY.read_text(encoding="utf-8"))
+# Summary.md
+st.subheader("📝 Summary (data/summary.md)")
+summary_text = load_text(SUMMARY_PATH, default="")
+if summary_text.strip():
+    st.markdown(summary_text)
 else:
-    st.warning("Não encontrei data/summary.md no repo. Rode o GitHub Actions ao menos 1x para gerar.")
-
-st.divider()
-
-# --- History (compact) ---
-st.subheader("🧾 History (últimos 5 runs)")
-if HISTORY.exists():
-    lines = HISTORY.read_text(encoding="utf-8").splitlines()
-    tail = lines[-5:] if len(lines) > 5 else lines
-
-    if not tail:
-        st.info("history.jsonl está vazio.")
-    else:
-        for line in reversed(tail):
-            try:
-                rec = json.loads(line)
-            except Exception:
-                continue
-            st.markdown(f"**run_id:** `{rec.get('run_id','')}`")
-            results = rec.get("results", []) or []
-
-            small = []
-            for r in results:
-                dest = r.get("destination") or _infer_dest_from_key(str(r.get("key", "")))
-                small.append(
-                    {
-                        "dest": dest,
-                        "price": _fmt_money(str(r.get("currency", "BRL") or "BRL"), r.get("price", float("inf"))),
-                        "dep": r.get("best_dep"),
-                        "ret": r.get("best_ret"),
-                    }
-                )
-
-            st.dataframe(pd.DataFrame(small), use_container_width=True, hide_index=True)
-            st.divider()
-else:
-    st.warning("Não encontrei data/history.jsonl no repo.")
+    st.info("Ainda não há summary.md (ou está vazio). Rode Actions 1x.")
 
 with st.expander("🔧 Debug", expanded=False):
     st.write("ROOT:", str(ROOT))
-    st.write("DATA_DIR exists:", DATA_DIR.exists())
-    st.write("Files:", [p.name for p in sorted(DATA_DIR.glob("*"))] if DATA_DIR.exists() else [])
+    st.write("DATA_DIR:", str(DATA_DIR))
+    st.write("Files:", [p.name for p in sorted(DATA_DIR.glob("*"))])
+    st.write("STATE exists:", STATE_PATH.exists())
+    st.write("SUMMARY exists:", SUMMARY_PATH.exists())
+    st.write("HISTORY exists:", HISTORY_PATH.exists())
