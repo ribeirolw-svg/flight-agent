@@ -106,4 +106,164 @@ def normalize_offers(
     raw: Dict[str, Any],
     origin: str,
     destination: str,
-    departu
+    departure_date: str,
+    run_id: str,
+    queried_at_utc: str,
+) -> pd.DataFrame:
+    rows: List[Dict[str, Any]] = []
+    offers = raw.get("data", []) or []
+
+    for offer in offers:
+        price = (offer.get("price") or {}).get("grandTotal")
+        currency = (offer.get("price") or {}).get("currency")
+        last_ticketing_date = offer.get("lastTicketingDate")
+
+        # tenta pegar 1 companhia do itinerário (nem sempre existe do jeito esperado)
+        validating_airline = offer.get("validatingAirlineCodes")
+        validating_airline = validating_airline[0] if isinstance(validating_airline, list) and validating_airline else None
+
+        rows.append(
+            {
+                "run_id": run_id,
+                "queried_at_utc": queried_at_utc,
+                "origin": origin,
+                "destination": destination,
+                "departure_date": departure_date,
+                "price_grand_total": price,
+                "currency": currency,
+                "validating_airline": validating_airline,
+                "last_ticketing_date": last_ticketing_date,
+                "offer_id": offer.get("id"),
+                "raw_offer_count": len(offers),
+            }
+        )
+
+    if not rows:
+        rows.append(
+            {
+                "run_id": run_id,
+                "queried_at_utc": queried_at_utc,
+                "origin": origin,
+                "destination": destination,
+                "departure_date": departure_date,
+                "price_grand_total": None,
+                "currency": None,
+                "validating_airline": None,
+                "last_ticketing_date": None,
+                "offer_id": None,
+                "raw_offer_count": 0,
+            }
+        )
+
+    return pd.DataFrame(rows)
+
+# ------------------------------------------------------------
+# Excel append (histórico)
+# ------------------------------------------------------------
+def append_to_excel(path: str, sheet_name: str, df_new: pd.DataFrame) -> None:
+    if not os.path.exists(path):
+        with pd.ExcelWriter(path, engine="openpyxl") as writer:
+            df_new.to_excel(writer, sheet_name=sheet_name, index=False)
+        return
+
+    # lê existente
+    try:
+        df_old = pd.read_excel(path, sheet_name=sheet_name)
+    except Exception:
+        df_old = pd.DataFrame()
+
+    df_all = pd.concat([df_old, df_new], ignore_index=True)
+
+    with pd.ExcelWriter(path, engine="openpyxl", mode="w") as writer:
+        df_all.to_excel(writer, sheet_name=sheet_name, index=False)
+
+# ------------------------------------------------------------
+# Main
+# ------------------------------------------------------------
+def main() -> None:
+    if not os.path.exists(ROUTES_FILE):
+        raise FileNotFoundError(f"Não achei routes.yaml em: {ROUTES_FILE}")
+
+    cfg = load_routes_config(ROUTES_FILE)
+
+    # routes.yaml pode ter:
+    # routes:
+    #   - origin: GRU
+    #     destination: FCO
+    #     nonstop: true
+    routes = cfg.get("routes") or []
+    if not routes:
+        # fallback: um default
+        routes = [{"origin": "GRU", "destination": "FCO", "nonstop": True}]
+
+    departure_dates = get_departure_dates(cfg)
+
+    run_id = str(uuid.uuid4())[:8]
+    queried_at_utc = datetime.now(timezone.utc).isoformat()
+
+    print("=======================================")
+    print("SCHEDULER RUN_ID:", run_id)
+    print("queried_at_utc:", queried_at_utc)
+    print("routes_count:", len(routes))
+    print("dates_count:", len(departure_dates))
+    print("output:", OUTPUT_XLSX)
+    print("=======================================")
+
+    all_frames: List[pd.DataFrame] = []
+
+    for r in routes:
+        origin = (r.get("origin") or "GRU").strip().upper()
+        destination = (r.get("destination") or "FCO").strip().upper()
+        nonstop = bool(r.get("nonstop", True))
+
+        for dep in departure_dates:
+            try:
+                raw = search_flights(
+                    origin=origin,
+                    destination=destination,
+                    departure_date=dep,
+                    adults=int(cfg.get("adults", 1)),
+                    currency=str(cfg.get("currency", "BRL")),
+                    nonstop=nonstop,
+                    max_results=int(cfg.get("max_results", 5)),
+                )
+                df = normalize_offers(
+                    raw=raw,
+                    origin=origin,
+                    destination=destination,
+                    departure_date=dep,
+                    run_id=run_id,
+                    queried_at_utc=queried_at_utc,
+                )
+                all_frames.append(df)
+                print(f"[OK] {origin}->{destination} {dep} | offers={df['raw_offer_count'].iloc[0]}")
+            except Exception as e:
+                print(f"[ERRO] {origin}->{destination} {dep} | {e}")
+                # registra erro também no histórico
+                df_err = pd.DataFrame([{
+                    "run_id": run_id,
+                    "queried_at_utc": queried_at_utc,
+                    "origin": origin,
+                    "destination": destination,
+                    "departure_date": dep,
+                    "price_grand_total": None,
+                    "currency": None,
+                    "validating_airline": None,
+                    "last_ticketing_date": None,
+                    "offer_id": None,
+                    "raw_offer_count": None,
+                    "error": str(e),
+                }])
+                all_frames.append(df_err)
+
+    df_all = pd.concat(all_frames, ignore_index=True) if all_frames else pd.DataFrame()
+    append_to_excel(OUTPUT_XLSX, SHEET_NAME, df_all)
+
+    print("=======================================")
+    print("FINALIZADO")
+    print("linhas_gravadas_neste_run:", len(df_all))
+    print("arquivo:", OUTPUT_XLSX)
+    print("=======================================")
+
+if __name__ == "__main__":
+    main()
