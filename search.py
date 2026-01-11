@@ -1,47 +1,95 @@
 from __future__ import annotations
 
+import json
 import os
-import time
-from dataclasses import dataclass
-from datetime import date, datetime, timedelta
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-import requests
+
+# =========================
+# Paths / IO
+# =========================
+DATA_DIR = Path(os.getenv("DATA_DIR", "data"))
+STATE_PATH = DATA_DIR / "state.json"
+HISTORY_PATH = DATA_DIR / "history.jsonl"
+SUMMARY_PATH = DATA_DIR / "summary.md"
 
 
-# ----------------------------
-# Config / Utils
-# ----------------------------
-AMADEUS_ENV = (os.getenv("AMADEUS_ENV") or "test").strip().lower()
-AMADEUS_BASE = "https://test.api.amadeus.com" if AMADEUS_ENV == "test" else "https://api.amadeus.com"
-
-CLIENT_ID = os.getenv("AMADEUS_CLIENT_ID")
-CLIENT_SECRET = os.getenv("AMADEUS_CLIENT_SECRET")
-
-DEFAULT_CURRENCY = os.getenv("CURRENCY_CODE", "BRL")
+def _ensure_data_dir() -> None:
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 
-def _require_secrets() -> None:
-    if not CLIENT_ID or not CLIENT_SECRET:
-        raise RuntimeError(
-            "AMADEUS_CLIENT_ID / AMADEUS_CLIENT_SECRET não configurados (env vars). "
-            "Configure os secrets no GitHub Actions."
-        )
+def _utc_now_stamp() -> str:
+    return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
 
 
-def _parse_iso_date(s: str) -> date:
-    return datetime.strptime(s, "%Y-%m-%d").date()
+def _utc_now_human() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 
 
-def _daterange(start: date, end: date, step_days: int) -> List[date]:
-    out = []
-    d = start
-    while d <= end:
-        out.append(d)
-        d += timedelta(days=step_days)
-    return out
+def load_state() -> Dict[str, Any]:
+    _ensure_data_dir()
+    if not STATE_PATH.exists():
+        return {"best": {}, "meta": {}}
+    return json.loads(STATE_PATH.read_text(encoding="utf-8"))
 
 
+def save_state(state: Dict[str, Any]) -> None:
+    _ensure_data_dir()
+    STATE_PATH.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def append_history(run_id: str, profile: Dict[str, Any], results: List[Dict[str, Any]]) -> None:
+    _ensure_data_dir()
+    record = {"run_id": run_id, "profile": profile, "results": results}
+    with open(HISTORY_PATH, "a", encoding="utf-8") as f:
+        f.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+
+def load_last_history_record() -> Optional[Dict[str, Any]]:
+    if not HISTORY_PATH.exists():
+        return None
+    try:
+        lines = HISTORY_PATH.read_text(encoding="utf-8").splitlines()
+        if not lines:
+            return None
+        return json.loads(lines[-1])
+    except Exception:
+        return None
+
+
+# =========================
+# Profile loading
+# =========================
+def load_profile() -> Dict[str, Any]:
+    raw = (os.getenv("SEARCH_PROFILE_JSON") or "").strip()
+    if raw:
+        try:
+            return json.loads(raw)
+        except Exception as e:
+            raise RuntimeError(f"SEARCH_PROFILE_JSON inválido (não é JSON): {e}")
+
+    candidates = [
+        Path("backend") / "search_profile.json",
+        Path("search_profile.json"),
+    ]
+    for p in candidates:
+        if p.exists():
+            try:
+                return json.loads(p.read_text(encoding="utf-8"))
+            except Exception as e:
+                raise RuntimeError(f"Arquivo {p} existe mas está inválido: {e}")
+
+    raise RuntimeError(
+        "No search profile found. Provide SEARCH_PROFILE_JSON env var or create file at: backend/search_profile.json"
+    )
+
+
+# =========================
+# Best persistence (rich)
+# =========================
 def _to_float(x: Any) -> Optional[float]:
     try:
         if x is None:
@@ -51,286 +99,335 @@ def _to_float(x: Any) -> Optional[float]:
         return None
 
 
-def _min_update(d: Dict[str, float], key: str, val: float) -> None:
-    cur = d.get(key)
-    if cur is None or val < cur:
-        d[key] = val
-
-
-def _carrier_from_offer(offer: Dict[str, Any]) -> Optional[str]:
-    codes = offer.get("validatingAirlineCodes")
-    if isinstance(codes, list) and codes:
-        return str(codes[0])
-    try:
-        seg = offer["itineraries"][0]["segments"][0]
-        return str(seg["carrierCode"])
-    except Exception:
-        return None
-
-
-def _extract_prices(offer: Dict[str, Any]) -> Tuple[Optional[float], Optional[float]]:
+def _best_price_from_result(r: Dict[str, Any]) -> Optional[float]:
     """
-    Retorna (base, total)
-    - base: sem taxas (price.base)
-    - total: com taxas (price.grandTotal ou price.total)
+    Preferência para decidir "melhor":
+      1) price_total (com taxas)
+      2) price (compat)
+      3) price_base (sem taxas)
     """
-    price_obj = offer.get("price") or {}
-
-    base = _to_float(price_obj.get("base"))
-    # Amadeus costuma ter grandTotal; se não, usa total
-    total = _to_float(price_obj.get("grandTotal"))
-    if total is None:
-        total = _to_float(price_obj.get("total"))
-
-    # Fallbacks: se um deles faltar, tenta preencher com o outro
-    if base is None and total is not None:
-        base = total
-    if total is None and base is not None:
-        total = base
-
-    return base, total
-
-
-# ----------------------------
-# Amadeus Client
-# ----------------------------
-@dataclass
-class AmadeusClient:
-    access_token: Optional[str] = None
-    token_expiry_ts: float = 0.0
-
-    def _token(self) -> str:
-        _require_secrets()
-
-        now = time.time()
-        if self.access_token and now < self.token_expiry_ts - 30:
-            return self.access_token
-
-        url = f"{AMADEUS_BASE}/v1/security/oauth2/token"
-        data = {
-            "grant_type": "client_credentials",
-            "client_id": CLIENT_ID,
-            "client_secret": CLIENT_SECRET,
-        }
-        r = requests.post(url, data=data, timeout=30)
-        r.raise_for_status()
-        payload = r.json()
-        self.access_token = payload["access_token"]
-        expires_in = int(payload.get("expires_in", 1800))
-        self.token_expiry_ts = now + expires_in
-        return self.access_token
-
-    def flight_offers_search(self, params: Dict[str, Any]) -> Dict[str, Any]:
-        url = f"{AMADEUS_BASE}/v2/shopping/flight-offers"
-        headers = {"Authorization": f"Bearer {self._token()}"}
-        r = requests.get(url, headers=headers, params=params, timeout=60)
-        r.raise_for_status()
-        return r.json()
-
-
-# ----------------------------
-# Core search
-# ----------------------------
-def _normalize_profile(profile: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Normaliza o profile para garantir:
-      - children (2–11) sempre usado
-      - infants nunca enviado (mesmo se existir no profile)
-    Observação: este endpoint GET não aceita idades; só quantidades.
-    """
-    p = dict(profile or {})
-
-    p.setdefault("origin", "GRU")
-    p.setdefault("destinations", ["FCO", "CIA"])
-    p.setdefault("travelClass", "ECONOMY")
-    p.setdefault("currencyCode", DEFAULT_CURRENCY)
-    p.setdefault("adults", 2)
-    p.setdefault("children", 1)
-
-    # aliases comuns
-    if "currency" in p and "currencyCode" not in p:
-        p["currencyCode"] = p["currency"]
-    if "class" in p and "travelClass" not in p:
-        p["travelClass"] = p["class"]
-
-    # 🔥 ponto 1: força children e remove infants/idade
-    p.pop("infants", None)
-    p.pop("infant", None)
-    p.pop("child_age", None)
-    p.pop("children_ages", None)
-
-    # garante int
-    p["adults"] = int(p.get("adults", 0) or 0)
-    p["children"] = int(p.get("children", 0) or 0)
-
-    if p["adults"] <= 0:
-        raise ValueError("Profile inválido: adults deve ser >= 1.")
-    if p["children"] < 0:
-        raise ValueError("Profile inválido: children não pode ser negativo.")
-
-    dep_start = p.get("dep_start") or p.get("departure_from") or p.get("departure_start")
-    dep_end = p.get("dep_end") or p.get("departure_to") or p.get("departure_end")
-    return_by = p.get("return_by") or p.get("return_limit")
-
-    if not dep_start or not dep_end or not return_by:
-        raise ValueError(
-            "Profile inválido: informe dep_start/dep_end/return_by (YYYY-MM-DD). "
-            "Ex: dep_start=2026-09-01 dep_end=2026-10-05 return_by=2026-10-05"
-        )
-
-    p["_dep_start"] = _parse_iso_date(str(dep_start))
-    p["_dep_end"] = _parse_iso_date(str(dep_end))
-    p["_return_by"] = _parse_iso_date(str(return_by))
-
-    p["dep_step_days"] = int(p.get("dep_step_days") or p.get("depStep") or 7)
-    p["ret_offset_days"] = int(p.get("ret_offset_days") or p.get("retOff") or 10)
-
-    # escolha de ranking: total ou base
-    # default: total (com taxas)
-    p["rank_by"] = str(p.get("rank_by") or "total").lower()  # "total" or "base"
-
+    p = _to_float(r.get("price_total"))
+    if p is None:
+        p = _to_float(r.get("price"))
+    if p is None:
+        p = _to_float(r.get("price_base"))
     return p
 
 
-def run_search(profile: Dict[str, Any]) -> List[Dict[str, Any]]:
+def _best_price_from_state_entry(entry: Dict[str, Any]) -> Optional[float]:
+    p = _to_float(entry.get("price_total"))
+    if p is None:
+        p = _to_float(entry.get("price"))
+    if p is None:
+        p = _to_float(entry.get("price_base"))
+    return p
+
+
+def update_best_state_rich(state: Dict[str, Any], results: List[Dict[str, Any]]) -> None:
     """
-    Retorna lista de resultados por destino (FCO/CIA) contendo:
-      key, origin, destination, currency,
-      price_base, price_total, price (compat: usa rank_by),
-      best_dep, best_ret, by_carrier, summary
+    Atualiza state["best"] com campos completos para o dashboard:
+      price, price_base, price_total, currency, summary,
+      origin, destination, best_dep, best_ret, by_carrier
+
+    Regra de overwrite:
+      - grava se não existia
+      - ou se preço novo (preferindo total) é menor que o anterior
+      - não sobrescreve preço bom com N/A / None
+      - mas grava "no offers" se ainda não existia a entrada
     """
-    p = _normalize_profile(profile)
-    client = AmadeusClient()
+    best_map: Dict[str, Any] = state.setdefault("best", {})
 
-    origin = str(p["origin"]).upper()
-    destinations = p.get("destinations") or ["FCO", "CIA"]
-    destinations = [str(x).upper() for x in destinations]
+    for r in results:
+        key = r.get("key")
+        if not key:
+            continue
+        key = str(key)
 
-    dep_dates = _daterange(p["_dep_start"], p["_dep_end"], p["dep_step_days"])
-    return_by: date = p["_return_by"]
-    ret_offset_days = p["ret_offset_days"]
+        prev = best_map.get(key)
+        prev_price = _best_price_from_state_entry(prev) if isinstance(prev, dict) else None
+        new_price = _best_price_from_result(r)
 
-    adults = int(p["adults"])
-    children = int(p["children"])
-    travel_class = str(p["travelClass"]).upper()
-    currency = str(p["currencyCode"]).upper()
-    rank_by = p["rank_by"]  # "total" or "base"
+        should_write = False
+        if prev is None:
+            should_write = True  # cria entry mesmo se N/A, para registrar "no offers"
+        elif prev_price is None and new_price is not None:
+            should_write = True
+        elif prev_price is not None and new_price is not None and new_price < prev_price:
+            should_write = True
+        else:
+            # se novo é None e já tinha preço -> não sobrescreve
+            should_write = False
 
-    results: List[Dict[str, Any]] = []
-
-    for dest in destinations:
-        # agregação por destino
-        best_rank_price: Optional[float] = None
-        best_price_base: Optional[float] = None
-        best_price_total: Optional[float] = None
-        best_dep: Optional[str] = None
-        best_ret: Optional[str] = None
-        by_carrier: Dict[str, float] = {}
-        offers_found = False
-
-        for dep in dep_dates:
-            ret = dep + timedelta(days=ret_offset_days)
-            if ret > return_by:
-                ret = return_by
-
-            params: Dict[str, Any] = {
-                "originLocationCode": origin,
-                "destinationLocationCode": dest,
-                "departureDate": dep.isoformat(),
-                "returnDate": ret.isoformat(),
-                "adults": adults,
-                # ✅ criança 2–11
-                "children": children,
-                "travelClass": travel_class,
-                "currencyCode": currency,
-                "max": 20,
+        if should_write:
+            best_map[key] = {
+                # compat: mantém o price principal
+                "price": r.get("price"),
+                # ✅ novos campos (base/total)
+                "price_base": r.get("price_base"),
+                "price_total": r.get("price_total"),
+                "currency": r.get("currency") or "BRL",
+                "summary": r.get("summary", "") or "",
+                "origin": r.get("origin", "GRU"),
+                "destination": r.get("destination"),
+                "best_dep": r.get("best_dep"),
+                "best_ret": r.get("best_ret"),
+                "by_carrier": r.get("by_carrier", {}) or {},
             }
 
-            data = client.flight_offers_search(params)
-            offers = data.get("data") or []
-            if not offers:
+
+# =========================
+# Summary generation (robusto)
+# =========================
+IATA_AIRLINE_NAMES = {
+    "AF": "Air France",
+    "LH": "Lufthansa",
+    "UX": "Air Europa",
+    "ET": "Ethiopian Airlines",
+    "AT": "Royal Air Maroc",
+    "TP": "TAP Air Portugal",
+    "AZ": "ITA Airways",
+    "IB": "Iberia",
+    "KL": "KLM",
+    "LX": "SWISS",
+    "BA": "British Airways",
+    "LA": "LATAM",
+    "TK": "Turkish Airlines",
+    "QR": "Qatar Airways",
+    "EK": "Emirates",
+}
+
+
+def _carrier_label(code: str) -> str:
+    code = (code or "").upper().strip()
+    name = IATA_AIRLINE_NAMES.get(code)
+    return f"{code} ({name})" if name else code
+
+
+def _money(currency: str, price: Any) -> str:
+    p = _to_float(price)
+    if p is None:
+        return "N/A"
+    return f"{currency} {p:,.2f}"
+
+
+def _infer_dest_from_key(key: str) -> str:
+    if key.startswith("GRU-FCO|"):
+        return "FCO"
+    if key.startswith("GRU-CIA|"):
+        return "CIA"
+    return ""
+
+
+def _extract_pax_from_key(key: str) -> str:
+    import re as _re
+
+    ma = _re.search(r"\|A(\d+)\|", key)
+    mc = _re.search(r"\|C(\d+)\|", key)
+    a = int(ma.group(1)) if ma else 0
+    c = int(mc.group(1)) if mc else 0
+    parts = []
+    if a:
+        parts.append(f"{a} adulto" + ("s" if a != 1 else ""))
+    if c:
+        parts.append(f"{c} criança" + ("s" if c != 1 else ""))
+    return " · ".join(parts) if parts else "—"
+
+
+def _best_carriers(by_carrier: Dict[str, Any]) -> List[Tuple[str, float]]:
+    rows: List[Tuple[str, float]] = []
+    if not isinstance(by_carrier, dict):
+        return rows
+    for c, v in by_carrier.items():
+        p = _to_float(v)
+        if p is None:
+            continue
+        rows.append((str(c), p))
+    rows.sort(key=lambda x: x[1])
+    return rows
+
+
+def _pick_best_rome_from_state(best_map: Dict[str, Any]) -> Optional[Tuple[str, Dict[str, Any]]]:
+    candidates: List[Tuple[float, str, Dict[str, Any]]] = []
+    for key, info in (best_map or {}).items():
+        key = str(key)
+        if not (key.startswith("GRU-FCO|") or key.startswith("GRU-CIA|")):
+            continue
+        info = info if isinstance(info, dict) else {}
+        p = _best_price_from_state_entry(info)
+        candidates.append((p if p is not None else float("inf"), key, info))
+    if not candidates:
+        return None
+    candidates.sort(key=lambda x: x[0])
+    return candidates[0][1], candidates[0][2]
+
+
+def _format_table(rows: List[List[str]]) -> str:
+    if not rows:
+        return ""
+    header = rows[0]
+    body = rows[1:]
+    out = []
+    out.append("| " + " | ".join(header) + " |")
+    out.append("| " + " | ".join(["---"] * len(header)) + " |")
+    for r in body:
+        out.append("| " + " | ".join(r) + " |")
+    return "\n".join(out)
+
+
+def write_summary(
+    run_id: str,
+    prev_run_id: Optional[str],
+    state: Dict[str, Any],
+    results: List[Dict[str, Any]],
+    prev_results: Optional[List[Dict[str, Any]]],
+) -> None:
+    _ensure_data_dir()
+
+    best_map: Dict[str, Any] = state.get("best", {}) if isinstance(state.get("best", {}), dict) else {}
+    best_rome = _pick_best_rome_from_state(best_map)
+
+    lines: List[str] = []
+    lines.append("# Flight Agent — Weekly Summary")
+    lines.append(f"Updated: {_utc_now_human()}")
+    lines.append(f"Latest run_id: {run_id}")
+    lines.append(f"Previous run_id: {prev_run_id or '—'}")
+    lines.append("")
+
+    # Headline Roma
+    lines.append("## Headline — São Paulo → Roma (FCO/CIA)")
+    if best_rome:
+        key, info = best_rome
+        currency = str(info.get("currency", "BRL") or "BRL")
+        price_txt = _money(currency, _best_price_from_state_entry(info))
+        dep = info.get("best_dep") or "—"
+        ret = info.get("best_ret") or "—"
+        dest = info.get("destination") or _infer_dest_from_key(key) or "ROM"
+        pax = _extract_pax_from_key(key)
+
+        lines.append(f"Best (state): GRU→{dest} — {price_txt}")
+        lines.append(f"Dates: depart {dep} · return {ret}")
+        lines.append(f"Pax: {pax}")
+        lines.append(f"Key: `{key}`")
+    else:
+        lines.append("No Rome results found in state.json yet.")
+    lines.append("")
+
+    # Roma by airline (Top 5) usando o best_rome.by_carrier
+    if best_rome:
+        _, info = best_rome
+        carriers = _best_carriers(info.get("by_carrier", {}) if isinstance(info, dict) else {})
+        if carriers:
+            lines.append("## Roma — by Airline (Top 5)")
+            table_rows = [["Airline", "Best Price (total)"]]
+            currency = str(info.get("currency", "BRL") or "BRL")
+            for code, price in carriers[:5]:
+                table_rows.append([_carrier_label(code), _money(currency, price)])
+            lines.append(_format_table(table_rows))
+            lines.append("")
+
+    # Current Best
+    lines.append("## Current Best (from state.json)")
+    if not best_map:
+        lines.append("No best prices recorded yet.")
+        lines.append("")
+    else:
+        table_rows = [["Route Key", "Best Price (total)", "Notes"]]
+
+        def _sort_key(item: Tuple[str, Dict[str, Any]]):
+            k, inf = item
+            inf = inf if isinstance(inf, dict) else {}
+            dest = (inf.get("destination") or _infer_dest_from_key(str(k)) or "ZZZ")
+            p = _best_price_from_state_entry(inf)
+            return (dest, p if p is not None else float("inf"))
+
+        for k, inf in sorted(best_map.items(), key=_sort_key):
+            inf = inf if isinstance(inf, dict) else {}
+            currency = str(inf.get("currency", "BRL") or "BRL")
+            table_rows.append([str(k), _money(currency, _best_price_from_state_entry(inf)), (inf.get("summary") or "")[:200]])
+        lines.append(_format_table(table_rows))
+        lines.append("")
+
+    # Snapshot run atual vs anterior
+    lines.append("## Latest Run — Snapshot")
+    if not results:
+        lines.append("No snapshot rows available yet.")
+    else:
+        prev_by_key = {}
+        if prev_results:
+            for r in prev_results:
+                if r.get("key"):
+                    prev_by_key[str(r["key"])] = r
+
+        snap_rows = [["Route Key", "This Run Best (total)", "Change vs Prev"]]
+        for r in results:
+            key = str(r.get("key", ""))
+            if not key:
                 continue
+            currency = str(r.get("currency", "BRL") or "BRL")
+            this_p = _best_price_from_result(r)
+            this_txt = _money(currency, this_p)
 
-            offers_found = True
+            prev = prev_by_key.get(key)
+            prev_p = _best_price_from_result(prev) if isinstance(prev, dict) else None
 
-            for offer in offers:
-                base, total = _extract_prices(offer)
-                if base is None and total is None:
-                    continue
+            if this_p is None or prev_p is None:
+                ch = "N/A"
+            else:
+                ch = _money(currency, this_p - prev_p)
 
-                # escolhe ranking
-                rank_price = total if rank_by == "total" else base
-                rank_price = rank_price if rank_price is not None else (total or base)
-                if rank_price is None:
-                    continue
+            snap_rows.append([key, this_txt, ch])
 
-                carrier = _carrier_from_offer(offer) or "??"
-                # por carrier a gente guarda o menor TOTAL (mais útil)
-                if total is not None:
-                    _min_update(by_carrier, carrier, total)
-                else:
-                    _min_update(by_carrier, carrier, rank_price)
+        lines.append(_format_table(snap_rows))
+    lines.append("")
 
-                if best_rank_price is None or rank_price < best_rank_price:
-                    best_rank_price = rank_price
-                    best_price_base = base
-                    best_price_total = total
-                    best_dep = dep.isoformat()
-                    best_ret = ret.isoformat()
+    SUMMARY_PATH.write_text("\n".join(lines).strip() + "\n", encoding="utf-8")
 
-        key = (
-            f"{origin}-{dest}"
-            f"|dep={p['_dep_start'].isoformat()}..{p['_dep_end'].isoformat()}"
-            f"|ret<={return_by.isoformat()}"
-            f"|class={travel_class}"
-            f"|A{adults}|C{children}|{currency}"
-            f"|depStep={p['dep_step_days']}|retOff={ret_offset_days}"
-            f"|rank={rank_by}"
-        )
 
-        if not offers_found:
-            results.append(
-                {
-                    "key": key,
-                    "origin": origin,
-                    "destination": dest,
-                    "currency": currency,
-                    "price": None,           # compat
-                    "price_base": None,
-                    "price_total": None,
-                    "best_dep": None,
-                    "best_ret": None,
-                    "by_carrier": {},
-                    "summary": (
-                        f"{origin}→{dest} no offers found dep={p['_dep_start'].isoformat()}..{p['_dep_end'].isoformat()} "
-                        f"return<= {return_by.isoformat()}"
-                    ),
-                }
-            )
-        else:
-            # compat: "price" = o que você escolheu para rankear
-            price_compat = best_price_total if rank_by == "total" else best_price_base
-            if price_compat is None:
-                price_compat = best_rank_price
+# =========================
+# Main
+# =========================
+def main() -> int:
+    try:
+        from search import run_search  # search.py na raiz
+    except Exception as e:
+        print(f"Scheduler failed: could not import run_search from search.py: {e}", file=sys.stderr)
+        return 2
 
-            results.append(
-                {
-                    "key": key,
-                    "origin": origin,
-                    "destination": dest,
-                    "currency": currency,
-                    "price": price_compat,            # compat p/ scheduler/report antigo
-                    "price_base": best_price_base,     # ✅ sem taxas
-                    "price_total": best_price_total,   # ✅ com taxas
-                    "best_dep": best_dep,
-                    "best_ret": best_ret,
-                    "by_carrier": by_carrier,          # menor TOTAL por carrier
-                    "summary": (
-                        f"{origin}→{dest} best_dep={best_dep} best_ret={best_ret} "
-                        f"cabin={travel_class} A={adults} C={children} rank_by={rank_by} "
-                        f"base={best_price_base} total={best_price_total}"
-                    ),
-                }
-            )
+    run_id = _utc_now_stamp()
+    state = load_state()
+    prev_history = load_last_history_record()
+    prev_run_id = prev_history.get("run_id") if prev_history else None
+    prev_results = prev_history.get("results") if prev_history else None
 
-    return results
+    try:
+        profile = load_profile()
+    except Exception as e:
+        print(f"Scheduler failed: {e}", file=sys.stderr)
+        return 1
+
+    try:
+        results = run_search(profile)
+        if results is None:
+            results = []
+        if not isinstance(results, list):
+            raise RuntimeError("run_search(profile) deve retornar uma lista de dicts.")
+    except Exception as e:
+        print(f"Scheduler failed: {e}", file=sys.stderr)
+        raise
+
+    meta = state.setdefault("meta", {})
+    meta["previous_run_id"] = meta.get("latest_run_id")
+    meta["latest_run_id"] = run_id
+
+    update_best_state_rich(state, results)
+
+    save_state(state)
+    append_history(run_id, profile, results)
+    write_summary(run_id, prev_run_id, state, results, prev_results)
+
+    print(f"OK: run_id={run_id} results={len(results)} state_best={len(state.get('best', {}))}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
