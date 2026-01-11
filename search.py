@@ -23,20 +23,21 @@ print("BASE_URL:", BASE_URL)
 print("CLIENT_ID PREFIX:", TEMP_CLIENT_ID[:6])
 print("=======================================")
 
-def amadeus_get_token():
-    response = requests.post(
+def amadeus_get_token(client_id: str, client_secret: str) -> str:
+    print("DEBUG Amadeus: BASE_URL =", BASE_URL)
+    print("DEBUG Amadeus: CLIENT_ID prefix =", client_id[:6])
+
+    resp = requests.post(
         TOKEN_URL,
         data={
             "grant_type": "client_credentials",
-            "client_id": TEMP_CLIENT_ID,
-            "client_secret": TEMP_CLIENT_SECRET,
+            "client_id": client_id,
+            "client_secret": client_secret,
         },
         timeout=30,
     )
-
-    response.raise_for_status()
-    return response.json()["access_token"]
-
+    resp.raise_for_status()
+    return resp.json()["access_token"]
 
 def search_flights(origin, destination, departure_date):
     token = amadeus_get_token()
