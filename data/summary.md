@@ -1,6 +1,6 @@
 # Flight Agent — Weekly Summary
 
-- Updated: **2026-01-05 18:28 UTC**
+- Updated: **2026-01-11 10:13 UTC**
 - Latest run_id: `20260105T182744Z`
 - Previous run_id: `20260105T180731Z`
 
