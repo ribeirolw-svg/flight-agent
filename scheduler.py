@@ -194,4 +194,64 @@ def main() -> None:
                 best_dep_run = dep
                 best_ret_run = ret
 
-        print(f"[OK] {origin}
+        print(f"[OK] {origin}->{destination} {dep}->{ret} offers={len(offers)}")
+
+    # Atualiza state.best (rota específica)
+    k = route_key(origin, destination, cfg)
+    if best_price_run is None:
+        # sem ofertas
+        best_map[k] = {
+            "price": float("inf"),
+            "currency": "BRL",
+            "run_id": run_id,
+            "ts_utc": ts_utc,
+            "summary": f"{origin}→{destination} no offers found dep={date_rule.get('depart_start')}..{date_rule.get('return_deadline')}",
+        }
+    else:
+        best_map[k] = {
+            "price_total": best_price_run,   # o Streamlit prefere price_total
+            "price": best_price_run,         # fallback
+            "currency": "BRL",
+            "run_id": run_id,
+            "ts_utc": ts_utc,
+            "best_dep": best_dep_run,
+            "best_ret": best_ret_run,
+            "destination": destination,
+            "by_carrier": by_carrier_best,
+            "summary": f"{origin}→{destination} best_dep={best_dep_run} best_ret={best_ret_run} cabin={cabin} A={adults} C={children}",
+        }
+
+    meta["previous_run_id"] = prev_latest
+    meta["latest_run_id"] = run_id
+
+    save_json(STATE_PATH, {"best": best_map, "meta": meta})
+
+    # Summary simples (o suficiente pra “mexer” sempre que o run rodar)
+    updated = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    best_line = "N/A" if best_price_run is None else f"BRL {best_price_run:,.2f}"
+
+    summary_md = f"""# Flight Agent — Weekly Summary
+
+- Updated: **{updated}**
+- Latest run_id: `{run_id}`
+- Previous run_id: `{prev_latest or "—"}`
+
+## Headline — {origin} → {destination}
+
+- **Best this run:** {origin}→{destination} — **{best_line}**
+- Dates: depart **{best_dep_run or "—"}** · return **{best_ret_run or "—"}**
+- Key: `{k}`
+"""
+    with open(SUMMARY_PATH, "w", encoding="utf-8") as f:
+        f.write(summary_md)
+
+    print("=======================================")
+    print("FINALIZADO")
+    print("state.json atualizado:", STATE_PATH)
+    print("summary.md atualizado:", SUMMARY_PATH)
+    print("history.jsonl atualizado:", HISTORY_PATH)
+    print("=======================================")
+
+
+if __name__ == "__main__":
+    main()
