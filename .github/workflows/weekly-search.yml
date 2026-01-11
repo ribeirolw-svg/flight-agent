@@ -3,7 +3,7 @@ name: Flight Agent Scheduler
 on:
   workflow_dispatch:
   schedule:
-    # 06:00 BRT = 09:00 UTC (GitHub Actions usa UTC)
+    # 08:10 BRT = 11:10 UTC (GitHub Actions usa UTC)
     - cron: "0 9 * * *"
 
 permissions:
