@@ -16,11 +16,12 @@ STATE_PATH = os.path.join(DATA_DIR, "state.json")
 SUMMARY_PATH = os.path.join(DATA_DIR, "summary.md")
 HISTORY_PATH = os.path.join(DATA_DIR, "history.jsonl")
 
-DOW = {
-    "MON": 0, "TUE": 1, "WED": 2, "THU": 3, "FRI": 4, "SAT": 5, "SUN": 6
-}
+DOW = {"MON": 0, "TUE": 1, "WED": 2, "THU": 3, "FRI": 4, "SAT": 5, "SUN": 6}
 
 
+# -----------------------------
+# IO helpers
+# -----------------------------
 def load_yaml(path: str) -> Dict[str, Any]:
     with open(path, "r", encoding="utf-8") as f:
         return yaml.safe_load(f) or {}
@@ -43,6 +44,9 @@ def append_jsonl(path: str, obj: Dict[str, Any]) -> None:
         f.write(json.dumps(obj, ensure_ascii=False) + "\n")
 
 
+# -----------------------------
+# date utils
+# -----------------------------
 def parse_yyyy_mm_dd(s: str) -> date:
     y, m, d = [int(x) for x in s.split("-")]
     return date(y, m, d)
@@ -57,6 +61,9 @@ def daterange(start: date, end: date) -> List[date]:
     return out
 
 
+# -----------------------------
+# offer utils
+# -----------------------------
 def pick_price_total(offer: Dict[str, Any]) -> Optional[float]:
     try:
         price_obj = offer.get("price") or {}
@@ -88,7 +95,7 @@ def build_pairs_rolling_weekend(rule: Dict[str, Any], today: date) -> List[Tuple
     dep_dows = [DOW[x] for x in (rule.get("depart_dows") or ["FRI", "SAT"])]
     ret_dows = [DOW[x] for x in (rule.get("return_dows") or ["SUN", "MON"])]
 
-    # opcional: limitar duração (em dias) se quiser
+    # Opcional: limitar duração
     min_stay = int(rule.get("min_stay_days", 1))
     max_stay = int(rule.get("max_stay_days", 7))
 
@@ -107,6 +114,7 @@ def build_pairs_rolling_weekend(rule: Dict[str, Any], today: date) -> List[Tuple
             if ret.weekday() in ret_dows:
                 pairs.append((dep.isoformat(), ret.isoformat()))
 
+    # evita explosão
     max_pairs = int(rule.get("max_pairs", 120))
     return pairs[:max_pairs]
 
@@ -124,18 +132,40 @@ def build_pairs_for_route(route_cfg: Dict[str, Any], today: date) -> List[Tuple[
 
 
 # -----------------------------
+# Config merge (defaults + route)
+# -----------------------------
+def merged_int(route_cfg: Dict[str, Any], defaults: Dict[str, Any], key: str, fallback: int) -> int:
+    v = route_cfg.get(key, defaults.get(key, fallback))
+    try:
+        return int(v)
+    except Exception:
+        return fallback
+
+
+def merged_str(route_cfg: Dict[str, Any], defaults: Dict[str, Any], key: str, fallback: str) -> str:
+    v = route_cfg.get(key, defaults.get(key, fallback))
+    return (str(v) if v is not None else fallback).strip()
+
+
+def merged_bool(route_cfg: Dict[str, Any], defaults: Dict[str, Any], key: str, fallback: bool) -> bool:
+    v = route_cfg.get(key, defaults.get(key, fallback))
+    return bool(v) if v is not None else fallback
+
+
+def merged_list(route_cfg: Dict[str, Any], defaults: Dict[str, Any], key: str) -> List[Any]:
+    v = route_cfg.get(key, defaults.get(key, []))
+    if v is None:
+        return []
+    if isinstance(v, list):
+        return v
+    return [v]
+
+
+# -----------------------------
 # Keys & state
 # -----------------------------
-def route_key(route_name: str, origin: str, destination: str, route_cfg: Dict[str, Any]) -> str:
-    adults = int(route_cfg.get("adults", 1))
-    children = int(route_cfg.get("children", 0))
-    cabin = (route_cfg.get("cabin") or "ECONOMY").strip().upper()
-    currency = (route_cfg.get("currency") or "BRL").strip().upper()
-
-    rule = route_cfg.get("date_rule") or {}
-    rtype = (rule.get("type") or "fixed").strip().upper()
-
-    return f"{route_name}|{origin}-{destination}|{rtype}|class={cabin}|A{adults}|C{children}|{currency}"
+def route_key(route_name: str, origin: str, destination: str, cabin: str, adults: int, children: int, currency: str, rule_type: str) -> str:
+    return f"{route_name}|{origin}-{destination}|{rule_type}|class={cabin}|A{adults}|C{children}|{currency}"
 
 
 def run_for_destination(
@@ -181,6 +211,11 @@ def run_for_destination(
             "departure_date": dep,
             "return_date": ret,
             "offers_count": len(offers),
+            "adults": adults,
+            "children": children,
+            "cabin": cabin,
+            "currency": currency,
+            "direct_only": direct_only,
         })
 
         for offer in offers:
@@ -211,9 +246,9 @@ def main() -> None:
         raise FileNotFoundError(f"Não achei routes.yaml em: {CONFIG_FILE}")
 
     cfg = load_yaml(CONFIG_FILE)
+
     sources = cfg.get("sources") or ["amadeus"]
     use_amadeus = "amadeus" in [s.lower() for s in sources]
-
     if not use_amadeus:
         print("[INFO] 'amadeus' não está em sources. Nada a fazer.")
         return
@@ -222,6 +257,7 @@ def main() -> None:
     if not isinstance(routes, list) or not routes:
         raise ValueError("routes.yaml precisa ter 'routes:' como lista não-vazia")
 
+    defaults = cfg.get("defaults") or {}
     origin_domestic = (cfg.get("origin_domestic") or "CGH").strip().upper()
 
     state = load_json(STATE_PATH, default={"best": {}, "meta": {"previous_run_id": None, "latest_run_id": None}})
@@ -238,38 +274,42 @@ def main() -> None:
     print("TS_UTC:", ts_utc)
     print("routes_count:", len(routes))
     print("origin_domestic:", origin_domestic)
+    print("defaults:", defaults)
     print("sources:", sources)
     print("=======================================")
 
     headline_lines: List[str] = []
 
     for route_cfg in routes:
-        route_name = (route_cfg.get("name") or "Route").strip()
-
+        route_name = merged_str(route_cfg, defaults, "name", "Route")
         is_domestic = bool(route_cfg.get("domestic", False))
-        origin = (
-            origin_domestic
-            if is_domestic
-            else (route_cfg.get("origin") or "GRU").strip().upper()
-        )
 
-        destinations = route_cfg.get("destinations") or []
-        if isinstance(destinations, str):
-            destinations = [destinations]
+        # Origem: domestic usa origin_domestic; internacional usa origin explícito (ou default GRU)
+        origin = origin_domestic if is_domestic else merged_str(route_cfg, defaults, "origin", "GRU").upper()
+        origin = origin.strip().upper()
+
+        destinations = merged_list(route_cfg, defaults, "destinations")
         destinations = [str(d).strip().upper() for d in destinations if str(d).strip()]
 
-        direct_only = bool(route_cfg.get("direct_only", True))
-        adults = int(route_cfg.get("adults", 1))
-        children = int(route_cfg.get("children", 0))
-        cabin = (route_cfg.get("cabin") or "ECONOMY").strip().upper()
-        currency = (route_cfg.get("currency") or "BRL").strip().upper()
+        direct_only = merged_bool(route_cfg, defaults, "direct_only", True)
+        adults = merged_int(route_cfg, defaults, "adults", 1)
+        children = merged_int(route_cfg, defaults, "children", 0)
+        cabin = merged_str(route_cfg, defaults, "cabin", "ECONOMY").upper()
+        currency = merged_str(route_cfg, defaults, "currency", "BRL").upper()
+
+        # child ages: metadado (endpoint não usa), mas guardamos no summary/state
+        children_ages = merged_list(route_cfg, defaults, "children_ages")
 
         pairs = build_pairs_for_route(route_cfg, today=today)
+
+        rule = route_cfg.get("date_rule") or {}
+        rule_type = (rule.get("type") or "fixed").strip().upper()
 
         print("---------------------------------------")
         print("ROUTE:", route_name)
         print("origin:", origin, "| destinations:", destinations, "| domestic:", is_domestic)
-        print("pairs_count:", len(pairs))
+        print("pax:", f"A{adults} C{children}", "| children_ages:", children_ages, "| cabin:", cabin)
+        print("rule_type:", rule_type, "| pairs_count:", len(pairs))
         print("---------------------------------------")
 
         for destination in destinations:
@@ -286,7 +326,16 @@ def main() -> None:
                 ts_utc=ts_utc,
             )
 
-            k = route_key(route_name, origin, destination, route_cfg)
+            k = route_key(
+                route_name=route_name,
+                origin=origin,
+                destination=destination,
+                cabin=cabin,
+                adults=adults,
+                children=children,
+                currency=currency,
+                rule_type=rule_type,
+            )
 
             if best_price is None:
                 best_map[k] = {
@@ -300,9 +349,10 @@ def main() -> None:
                     "origin": origin,
                     "destination": destination,
                     "by_carrier": {},
-                    "summary": f"{route_name}: {origin}→{destination} sem ofertas (regra {route_cfg.get('date_rule', {}).get('type')})",
+                    "pax": {"adults": adults, "children": children, "children_ages": children_ages},
+                    "summary": f"{route_name}: {origin}→{destination} sem ofertas (A={adults} C={children})",
                 }
-                headline_lines.append(f"- {route_name} — {origin}→{destination}: **N/A**")
+                headline_lines.append(f"- {route_name} — {origin}→{destination}: **N/A** (A{adults} C{children})")
             else:
                 best_map[k] = {
                     "price_total": best_price,
@@ -315,9 +365,12 @@ def main() -> None:
                     "origin": origin,
                     "destination": destination,
                     "by_carrier": by_carrier,
+                    "pax": {"adults": adults, "children": children, "children_ages": children_ages},
                     "summary": f"{route_name}: {origin}→{destination} best_dep={best_dep} best_ret={best_ret} cabin={cabin} A={adults} C={children}",
                 }
-                headline_lines.append(f"- {route_name} — {origin}→{destination}: **{currency} {best_price:,.2f}** ({best_dep} → {best_ret})")
+                headline_lines.append(
+                    f"- {route_name} — {origin}→{destination}: **{currency} {best_price:,.2f}** ({best_dep} → {best_ret}) (A{adults} C{children})"
+                )
 
     meta["previous_run_id"] = prev_latest
     meta["latest_run_id"] = run_id
