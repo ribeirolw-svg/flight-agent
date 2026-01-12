@@ -1,8 +1,16 @@
 {
+  "run_id": "20260112T141013Z",
+  "started_utc": "2026-01-12T14:10:13Z",
+  "finished_utc": "2026-01-12T14:12:25Z",
+  "duration_sec": 132,
+  "total_calls": 52,
+  "ok_calls": 52,
+  "err_calls": 0,
+  "success_rate": 1.0,
+  "offers_saved": 390,
   "store": "default",
-  "env": "test",
   "max_results": 10,
-  "routes_file": "routes.yaml",
+  "amadeus_env": "test",
   "immutable_required_origins": [
     "CGH",
     "GRU"
@@ -11,16 +19,5 @@
     "CWB",
     "FCO",
     "NVT"
-  ],
-  "last_run": {
-    "run_id": "20260112T133634Z",
-    "started_utc": "2026-01-12T13:36:34Z",
-    "finished_utc": "2026-01-12T13:36:49Z",
-    "duration_sec": 15,
-    "total_calls": 4,
-    "ok_calls": 4,
-    "err_calls": 0,
-    "success_rate": 1.0,
-    "offers_saved": 34
-  }
+  ]
 }
