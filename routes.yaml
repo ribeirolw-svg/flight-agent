@@ -1,4 +1,12 @@
+# routes.yaml (modelo final com REGRAS IMUTÁVEIS + ALERTAS + BEST-OFFER)
+# - Roma: ida >= 01/09, sempre 15 dias, retorno <= 05/10, SEM PARADAS, 2A+1C, alvo <= 13.000
+# - Curitiba: olhar 30 dias pra frente, ida Sex/Sáb, volta Dom/Seg, direto, 2A+1C, alvo <= 800
+# - Navegantes: olhar 30 dias pra frente, ida Sex/Sáb, volta Dom/Seg, (sem restrição de paradas aqui), 1A, alvo <= 350
+
 routes:
+  # =========================
+  # ROMA (GRU -> FCO)
+  # =========================
   - id: "ROMA_GRU_FCO_2A1C_DIRECT"
     origin: "GRU"
     destination: "FCO"
@@ -10,13 +18,16 @@ routes:
     rule: "ROME_15D_WINDOW"
     rule_params:
       trip_days: 15
-      start_mm_dd: [9, 1]
-      latest_return_mm_dd: [10, 5]
+      start_mm_dd: [9, 1]          # 01/09
+      latest_return_mm_dd: [10, 5] # 05/10
     watch:
       target_price_total: 13000
       alert_drop_pct: 8
-      max_stops: 0
+      max_stops: 0                 # garante "sem paradas" também no best/alert
 
+  # =========================
+  # CURITIBA (CGH -> CWB)
+  # =========================
   - id: "CWB_CGH_2A1C_DIRECT"
     origin: "CGH"
     destination: "CWB"
@@ -28,14 +39,17 @@ routes:
     rule: "WEEKEND_30D"
     rule_params:
       horizon_days: 30
-      depart_dows: [4, 5]
-      return_dows: [6, 0]
+      depart_dows: [4, 5]          # Sex=4, Sáb=5
+      return_dows: [6, 0]          # Dom=6, Seg=0
       max_trip_len_days: 4
     watch:
       target_price_total: 800
       alert_drop_pct: 10
-      max_stops: 0
+      max_stops: 0                 # direto
 
+  # =========================
+  # NAVEGANTES (GRU -> NVT)
+  # =========================
   - id: "NVT_GRU_1A"
     origin: "GRU"
     destination: "NVT"
@@ -47,8 +61,8 @@ routes:
     rule: "WEEKEND_30D"
     rule_params:
       horizon_days: 30
-      depart_dows: [4, 5]
-      return_dows: [6, 0]
+      depart_dows: [4, 5]          # Sex=4, Sáb=5
+      return_dows: [6, 0]          # Dom=6, Seg=0
       max_trip_len_days: 4
     watch:
       target_price_total: 350
