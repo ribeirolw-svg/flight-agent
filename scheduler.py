@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import json
 import os
-import uuid
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -39,7 +38,6 @@ ALERTS_FILE = DATA_DIR / "alerts.json"
 
 DEFAULT_MAX_RESULTS = int(os.getenv("MAX_RESULTS", "10"))
 
-# Amadeus endpoints
 AMADEUS_TEST_BASE = "https://test.api.amadeus.com"
 AMADEUS_PROD_BASE = "https://api.amadeus.com"
 
@@ -56,7 +54,6 @@ def utc_now_iso() -> str:
 
 
 def run_id_utc() -> str:
-    # compatível com seu formato: 20260112T133634Z
     return utc_now().strftime("%Y%m%dT%H%M%SZ")
 
 
@@ -78,12 +75,11 @@ def safe_float(x: Any) -> Optional[float]:
 def route_key(route: Dict[str, Any]) -> str:
     """
     Chave estável para best/alerts.
-    Prioriza route['id'] (recomendado).
+    *Obrigatório* usar id quando há datas dinâmicas, senão explode o histórico.
     """
     rid = route.get("id")
     if rid:
         return str(rid)
-    # fallback estável (menos ideal)
     return f'{route.get("origin","")}-{route.get("destination","")}:{route.get("cabin","")}'
 
 
@@ -102,12 +98,6 @@ def generate_rome_pairs(
     latest_return_mm_dd: Tuple[int, int] = (10, 5),
     trip_days: int = 15,
 ) -> List[Tuple[date, date]]:
-    """
-    Roma:
-      - ida a partir de 01/09
-      - sempre 15 dias
-      - retorno até 05/10
-    """
     start = date(year, start_mm_dd[0], start_mm_dd[1])
     latest_return = date(year, latest_return_mm_dd[0], latest_return_mm_dd[1])
     latest_depart = latest_return - timedelta(days=trip_days)
@@ -125,16 +115,10 @@ def generate_rome_pairs(
 def generate_weekend_pairs(
     base: date,
     horizon_days: int = 30,
-    depart_dows: Tuple[int, int] = (4, 5),  # Sex(4) ou Sáb(5)
-    return_dows: Tuple[int, int] = (6, 0),  # Dom(6) ou Seg(0)
+    depart_dows: Tuple[int, int] = (4, 5),   # Sex(4) ou Sáb(5)
+    return_dows: Tuple[int, int] = (6, 0),   # Dom(6) ou Seg(0)
     max_trip_len_days: int = 4,
 ) -> List[Tuple[date, date]]:
-    """
-    Curitiba / Navegantes:
-      - olhar sempre 30 dias pra frente
-      - ida na sexta ou sábado
-      - volta no domingo ou na segunda
-    """
     end = base + timedelta(days=horizon_days)
     pairs = set()
 
@@ -151,17 +135,13 @@ def generate_weekend_pairs(
 
 
 def expand_routes(base_routes: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """
-    Expande routes com 'rule' em múltiplas routes com departure_date/return_date.
-    Mantém routes fixas (se existirem) como estão.
-    """
     today = local_today()
     expanded: List[Dict[str, Any]] = []
 
     for r in base_routes:
         rule = (r.get("rule") or "").strip().upper()
 
-        # rota fixa (não recomendado pro seu caso, mas suportado)
+        # rota fixa (mantém compatibilidade)
         if r.get("departure_date") and r.get("return_date") and not rule:
             expanded.append(r)
             continue
@@ -174,15 +154,14 @@ def expand_routes(base_routes: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
             pairs = generate_rome_pairs(
                 year=today.year,
-                start_mm_dd=start_mm_dd,  # type: ignore
+                start_mm_dd=start_mm_dd,                  # type: ignore
                 latest_return_mm_dd=latest_return_mm_dd,  # type: ignore
                 trip_days=trip_days,
             )
-            # se já estivermos fora da janela do ano atual, tenta ano seguinte
             if not pairs:
                 pairs = generate_rome_pairs(
                     year=today.year + 1,
-                    start_mm_dd=start_mm_dd,  # type: ignore
+                    start_mm_dd=start_mm_dd,                  # type: ignore
                     latest_return_mm_dd=latest_return_mm_dd,  # type: ignore
                     trip_days=trip_days,
                 )
@@ -203,8 +182,8 @@ def expand_routes(base_routes: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
             pairs = generate_weekend_pairs(
                 base=today,
                 horizon_days=horizon_days,
-                depart_dows=depart_dows,  # type: ignore
-                return_dows=return_dows,  # type: ignore
+                depart_dows=depart_dows,        # type: ignore
+                return_dows=return_dows,        # type: ignore
                 max_trip_len_days=max_trip_len_days,
             )
             for dep, ret in pairs:
@@ -214,8 +193,7 @@ def expand_routes(base_routes: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                 expanded.append(rr)
 
         else:
-            # Sem datas e sem rule reconhecida: ignora (ou poderia levantar erro)
-            # Aqui vou ignorar pra não quebrar seu workflow.
+            # sem datas e sem rule reconhecida -> ignora
             continue
 
     return expanded
@@ -302,12 +280,12 @@ def amadeus_search_offers(
     headers = {"Authorization": f"Bearer {token}"}
     resp = requests.get(url, headers=headers, params=params, timeout=45)
 
-    # Amadeus às vezes retorna 400 por datas inválidas/combinações — trata como "sem ofertas"
     if resp.status_code >= 400:
         try:
             payload = resp.json()
         except Exception:
             payload = {"error": resp.text}
+        # retornamos um marcador de erro para o caller decidir
         return [{"_error": payload, "_status": resp.status_code}]
 
     payload = resp.json()
@@ -315,65 +293,102 @@ def amadeus_search_offers(
 
 
 # -----------------------------
-# Normalização de offer (para best/alert)
+# Normalização de offer (BALA DE PRATA)
 # -----------------------------
 def normalize_offer(offer: Dict[str, Any]) -> Dict[str, Any]:
     """
-    Mapeia o Flight Offer do Amadeus para campos úteis.
+    Suporta:
+    A) Amadeus raw: price.grandTotal, validatingAirlineCodes, itineraries.segments
+    B) Simplificado: price_total/total_price/price/total, carrier/airline, stops/number_of_stops
     """
-    # preço total (string) em offer["price"]["grandTotal"] geralmente
-    price = None
-    try:
-        price = safe_float(offer.get("price", {}).get("grandTotal"))
-    except Exception:
-        price = None
+    # preço
+    price = (
+        safe_float(offer.get("price_total"))
+        or safe_float(offer.get("total_price"))
+        or safe_float(offer.get("price"))
+        or safe_float(offer.get("total"))
+    )
+    if price is None:
+        price = safe_float((offer.get("price") or {}).get("grandTotal"))
 
-    carrier = offer.get("validatingAirlineCodes", ["?"])
-    if isinstance(carrier, list) and carrier:
-        carrier = carrier[0]
-    elif not isinstance(carrier, str):
-        carrier = "?"
+    # cia
+    carrier = offer.get("carrier") or offer.get("airline") or offer.get("validating_airline")
+    if not carrier:
+        vac = offer.get("validatingAirlineCodes")
+        if isinstance(vac, list) and vac:
+            carrier = vac[0]
+        elif isinstance(vac, str) and vac:
+            carrier = vac
+        else:
+            carrier = "?"
 
-    # stops: soma por itinerário -> segmentos -1
-    stops = 0
+    # stops
+    stops = offer.get("stops")
+    if stops is None:
+        stops = offer.get("number_of_stops")
+
+    if stops is None:
+        try:
+            stops_calc = 0
+            for it in offer.get("itineraries", []) or []:
+                segs = it.get("segments", []) or []
+                stops_calc = max(stops_calc, max(0, len(segs) - 1))
+            stops = stops_calc
+        except Exception:
+            stops = 99
+
     try:
-        itineraries = offer.get("itineraries", [])
-        # considera o máximo stops em qualquer itinerary (ida/volta)
-        stops = 0
-        for it in itineraries:
-            segs = it.get("segments", []) or []
-            s = max(0, len(segs) - 1)
-            stops = max(stops, s)
+        stops = int(stops)
     except Exception:
         stops = 99
 
-    return {"price_total": price, "carrier": carrier, "stops": int(stops), "raw": offer}
+    return {"price_total": price, "carrier": carrier, "stops": stops, "raw": offer}
 
 
-def pick_best_offer(offers: List[Dict[str, Any]], watch: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    norm = [normalize_offer(o) for o in offers if isinstance(o, dict) and "_error" not in o]
-    norm = [o for o in norm if o["price_total"] is not None]
+# -----------------------------
+# Pick best (agregando várias datas por ID)
+# -----------------------------
+def pick_best_offer(
+    candidates: List[Dict[str, Any]],
+    watch: Dict[str, Any],
+) -> Optional[Dict[str, Any]]:
+    """
+    candidates: lista de dicts no formato:
+      { "offer": <raw_offer>, "departure_date": "...", "return_date": "..." }
+    """
+    normed: List[Dict[str, Any]] = []
+
+    for c in candidates:
+        offer = c.get("offer")
+        if not isinstance(offer, dict) or "_error" in offer:
+            continue
+        n = normalize_offer(offer)
+        if n["price_total"] is None:
+            continue
+        n["departure_date"] = c.get("departure_date")
+        n["return_date"] = c.get("return_date")
+        normed.append(n)
 
     # filtros opcionais
     max_stops = watch.get("max_stops")
     if max_stops is not None:
         try:
             ms = int(max_stops)
-            norm = [o for o in norm if o["stops"] <= ms]
+            normed = [o for o in normed if o["stops"] <= ms]
         except Exception:
             pass
 
     prefer_airlines = set(watch.get("prefer_airlines") or [])
     if prefer_airlines:
-        preferred = [o for o in norm if o["carrier"] in prefer_airlines]
+        preferred = [o for o in normed if o["carrier"] in prefer_airlines]
         if preferred:
-            norm = preferred
+            normed = preferred
 
-    if not norm:
+    if not normed:
         return None
 
-    norm.sort(key=lambda x: x["price_total"])
-    return norm[0]
+    normed.sort(key=lambda x: x["price_total"])
+    return normed[0]
 
 
 # -----------------------------
@@ -386,11 +401,7 @@ def load_prev_best() -> Dict[str, Any]:
 
 
 def save_best(run_id: str, best_by_route: Dict[str, Any]) -> None:
-    payload = {
-        "run_id": run_id,
-        "updated_utc": utc_now_iso(),
-        "by_route": best_by_route,
-    }
+    payload = {"run_id": run_id, "updated_utc": utc_now_iso(), "by_route": best_by_route}
     BEST_FILE.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
@@ -399,29 +410,40 @@ def save_alerts(run_id: str, alerts: List[Dict[str, Any]]) -> None:
     ALERTS_FILE.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
-def build_alerts(
+def build_best_and_alerts(
     run_id: str,
-    routes: List[Dict[str, Any]],
+    routes_base: List[Dict[str, Any]],
     offers_by_route: Dict[str, List[Dict[str, Any]]],
 ) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
+    """
+    routes_base: as rotas "base" do YAML (com rule, sem datas travadas)
+    offers_by_route: agregado por route_key(id) já com candidates de múltiplas datas
+    """
     prev_best = load_prev_best().get("by_route", {})
     best_by_route: Dict[str, Any] = {}
     alerts: List[Dict[str, Any]] = []
 
-    for r in routes:
+    for r in routes_base:
         rk = route_key(r)
         watch = r.get("watch") or {}
         best = pick_best_offer(offers_by_route.get(rk, []), watch)
+
+        adults = int(r.get("adults", 1))
+        children = int(r.get("children", 0))
 
         if best is None:
             best_by_route[rk] = {
                 "id": r.get("id"),
                 "origin": r["origin"],
                 "destination": r["destination"],
-                "departure_date": r["departure_date"],
-                "return_date": r["return_date"],
-                "note": "no_offers_after_filters",
+                "adults": adults,
+                "children": children,
+                "carrier": None,
+                "stops": None,
                 "price_total": None,
+                "departure_date": None,
+                "return_date": None,
+                "note": "no_offers_after_filters",
             }
             continue
 
@@ -429,11 +451,13 @@ def build_alerts(
             "id": r.get("id"),
             "origin": r["origin"],
             "destination": r["destination"],
-            "departure_date": r["departure_date"],
-            "return_date": r["return_date"],
+            "adults": adults,
+            "children": children,
             "carrier": best["carrier"],
             "stops": best["stops"],
             "price_total": best["price_total"],
+            "departure_date": best.get("departure_date"),
+            "return_date": best.get("return_date"),
         }
         best_by_route[rk] = best_payload
 
@@ -449,8 +473,10 @@ def build_alerts(
                     "target_price": target,
                     "carrier": best["carrier"],
                     "stops": best["stops"],
-                    "departure_date": r["departure_date"],
-                    "return_date": r["return_date"],
+                    "departure_date": best.get("departure_date"),
+                    "return_date": best.get("return_date"),
+                    "adults": adults,
+                    "children": children,
                 }
             )
 
@@ -471,8 +497,10 @@ def build_alerts(
                         "delta_pct": delta_pct,
                         "carrier": best["carrier"],
                         "stops": best["stops"],
-                        "departure_date": r["departure_date"],
-                        "return_date": r["return_date"],
+                        "departure_date": best.get("departure_date"),
+                        "return_date": best.get("return_date"),
+                        "adults": adults,
+                        "children": children,
                     }
                 )
 
@@ -504,17 +532,15 @@ def main() -> None:
     rid = run_id_utc()
 
     cfg = load_config()
-    base_routes = cfg.get("routes") or []
+    routes_base = cfg.get("routes") or []
 
-    # Expande regras imutáveis -> gera datas
-    routes = expand_routes(base_routes)
+    # gera rotas com datas (para chamadas)
+    routes_expanded = expand_routes(routes_base)
 
-    # valida regras imutáveis por origem/destino
-    validate_immutable_rules(routes)
+    # valida regras imutáveis por origem/destino (olhando o expandido)
+    validate_immutable_rules(routes_expanded)
 
-    # Amadeus env (default: test)
     amadeus_env = (os.getenv("AMADEUS_ENV") or "test").strip().lower()
-
     client_id = os.getenv("AMADEUS_CLIENT_ID") or ""
     client_secret = os.getenv("AMADEUS_CLIENT_SECRET") or ""
     if not client_id or not client_secret:
@@ -524,18 +550,19 @@ def main() -> None:
 
     print(f"[INFO] Run: {rid}")
     print(f"[INFO] Store: default | Env: {amadeus_env} | Max results: {max_results}")
-    print(f"[INFO] Routes: {len(routes)} | Routes file: {ROUTES_FILE}")
+    print(f"[INFO] Routes expanded: {len(routes_expanded)} | Routes base: {len(routes_base)} | Routes file: {ROUTES_FILE}")
 
     token = amadeus_get_token(client_id, client_secret, amadeus_env)
 
+    # agregado por id/route_key (NÃO sobrescreve)
     offers_by_route: Dict[str, List[Dict[str, Any]]] = {}
+
     ok_calls = 0
     err_calls = 0
     offers_saved = 0
-    total_calls = len(routes)
+    total_calls = len(routes_expanded)
 
-    # chama Amadeus por rota
-    for idx, r in enumerate(routes, start=1):
+    for idx, r in enumerate(routes_expanded, start=1):
         origin = r["origin"]
         dest = r["destination"]
         dep = r["departure_date"]
@@ -547,6 +574,7 @@ def main() -> None:
         direct_only = bool(r.get("direct_only", False))
 
         rk = route_key(r)
+        offers_by_route.setdefault(rk, [])
 
         data = amadeus_search_offers(
             token=token,
@@ -563,21 +591,20 @@ def main() -> None:
             max_results=max_results,
         )
 
-        # se veio erro tratado (lista com _error)
         if data and isinstance(data, list) and isinstance(data[0], dict) and "_error" in data[0]:
             err_calls += 1
-            offers_by_route[rk] = []
             print(f"[ERR] ({idx}/{total_calls}) {origin}->{dest} {dep}/{ret} | error_status={data[0].get('_status')}")
             continue
 
-        offers_by_route[rk] = data
         ok_calls += 1
         offers_saved += len(data)
-
         print(f"[OK] ({idx}/{total_calls}) {origin}->{dest} {dep}/{ret} | offers: {len(data)}")
 
-        # salva histórico por offer (flatten)
+        # agrega candidates para best/alerts (com datas)
         for offer in data:
+            offers_by_route[rk].append({"offer": offer, "departure_date": dep, "return_date": ret})
+
+            # salva histórico por offer
             append_history_line(
                 {
                     "run_id": rid,
@@ -597,8 +624,8 @@ def main() -> None:
                 }
             )
 
-    # best + alerts
-    best_by_route, alerts = build_alerts(rid, routes, offers_by_route)
+    # best + alerts (por rota BASE / id)
+    best_by_route, alerts = build_best_and_alerts(rid, routes_base, offers_by_route)
     save_best(rid, best_by_route)
     save_alerts(rid, alerts)
 
@@ -623,15 +650,13 @@ def main() -> None:
     }
     save_state(state)
 
-    # Sample offers (preview)
+    # samples
     sample_lines = []
-    for r in routes[:3]:
-        rk = route_key(r)
-        best = best_by_route.get(rk)
-        if best and best.get("price_total") is not None:
+    for rk, b in list(best_by_route.items())[:3]:
+        if b and b.get("price_total") is not None:
             sample_lines.append(
-                f'- {best["origin"]}->{best["destination"]} {best["departure_date"]}/{best["return_date"]} | '
-                f'{best.get("carrier","?")} | BRL {best["price_total"]:.2f} | {best.get("stops", "?")} stop(s)'
+                f'- {b["origin"]}->{b["destination"]} {b.get("departure_date")}/{b.get("return_date")} | '
+                f'{b.get("carrier","?")} | BRL {b["price_total"]:.2f} | {b.get("stops", "?")} stop(s)'
             )
 
     summary = f"""# Flight Agent — Update Summary
