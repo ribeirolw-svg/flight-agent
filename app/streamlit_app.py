@@ -1,12 +1,23 @@
-# app.py
 from __future__ import annotations
 
 import streamlit as st
 import pandas as pd
 from datetime import datetime, timedelta, timezone
 
-from history_store import ensure_jsonl, load_records, append_search_record, SearchRecord, utc_now_iso
-from analytics import to_dataframe, apply_filters, summary_metrics, group_views
+from utils.history_store import (
+    ensure_jsonl,
+    load_records,
+    append_search_record,
+    SearchRecord,
+    utc_now_iso,
+)
+
+from utils.analytics import (
+    to_dataframe,
+    apply_filters,
+    summary_metrics,
+    group_views,
+)
 
 st.set_page_config(page_title="Flight Tracker", layout="wide")
 
@@ -29,7 +40,12 @@ st.title("✈️ Flight Tracker — Histórico & Insights")
 with st.sidebar:
     st.header("⚙️ Config")
 
-    limit = st.number_input("Carregar últimos N registros (0 = tudo)", min_value=0, value=2000, step=500)
+    limit = st.number_input(
+        "Carregar últimos N registros (0 = tudo)",
+        min_value=0,
+        value=2000,
+        step=500,
+    )
     limit_val = None if limit == 0 else int(limit)
 
     refresh = st.button("🔄 Recarregar histórico")
@@ -101,7 +117,8 @@ with left:
     st.subheader("📋 Histórico filtrado (tabela calculável)")
     show_cols = [c for c in [
         "ts_utc", "origin", "destination", "route", "departure_date", "return_date",
-        "best_airline", "best_price", "best_stops", "offers_count", "direct_only", "cabin", "currency", "provider"
+        "best_airline", "best_price", "best_stops", "offers_count",
+        "direct_only", "cabin", "currency", "provider"
     ] if c in df_f.columns]
 
     dshow = df_f[show_cols].sort_values("ts_utc", ascending=False)
