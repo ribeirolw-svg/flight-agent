@@ -1,23 +1,23 @@
 {
-  "run_id": "20260112T174518Z",
+  "run_id": "20260112T180049Z",
   "expanded_ranges": {
     "ROMA_GRU_FCO_2A1C_DIRECT": {
       "min_dep": "2026-09-01",
-      "max_dep": "2026-09-19",
-      "count": 10,
-      "step_days": 2
+      "max_dep": "2026-09-05",
+      "count": 2,
+      "step_days": 4
     },
     "CWB_CGH_2A1C_DIRECT": {
       "base": "2026-03-13",
       "min_dep": "2026-03-13",
-      "max_dep": "2026-04-04",
-      "count": 16
+      "max_dep": "2026-03-13",
+      "count": 2
     },
     "NVT_GRU_1A": {
       "base": "2026-03-13",
       "min_dep": "2026-03-13",
-      "max_dep": "2026-04-04",
-      "count": 16
+      "max_dep": "2026-03-13",
+      "count": 2
     }
   },
   "errors_sample": {
@@ -27,6 +27,28 @@
         "destination": "FCO",
         "departure_date": "2026-09-01",
         "return_date": "2026-09-16",
+        "adults": 2,
+        "children": 1,
+        "direct_only": true
+      },
+      "err": {
+        "errors": [
+          {
+            "code": 38195,
+            "title": "Quota limit exceeded",
+            "detail": "The quota limit is exceeded",
+            "status": 429
+          }
+        ],
+        "_status": 429
+      }
+    },
+    "CWB_CGH_2A1C_DIRECT": {
+      "ctx": {
+        "origin": "CGH",
+        "destination": "CWB",
+        "departure_date": "2026-03-13",
+        "return_date": "2026-03-15",
         "adults": 2,
         "children": 1,
         "direct_only": true
