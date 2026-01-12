@@ -1,35 +1,49 @@
 {
-  "run_id": "20260112T185710Z",
-  "started_utc": "2026-01-12T18:57:10Z",
-  "finished_utc": "2026-01-12T18:57:39Z",
-  "duration_sec": 28,
-  "total_calls": 6,
+  "run_id": "20260112T200347Z",
+  "started_utc": "2026-01-12T20:03:47Z",
+  "finished_utc": "2026-01-12T20:04:14Z",
+  "duration_sec": 27,
+  "total_calls": 3,
   "ok_calls": 0,
   "err_calls": 3,
+  "empty_ok_calls": 0,
   "success_rate": 0.0,
   "offers_saved": 0,
-  "amadeus_env": "test",
+  "store": "default",
   "max_results": 10,
+  "amadeus_env": "test",
+  "immutable_required_origins": [
+    "CGH",
+    "GRU"
+  ],
+  "immutable_required_dests": [
+    "CWB",
+    "FCO",
+    "NVT"
+  ],
   "expanded_ranges": {
     "ROMA_GRU_FCO_2A1C_DIRECT": {
       "min_dep": "2026-09-01",
-      "max_dep": "2026-09-05",
+      "max_dep": "2026-09-20",
       "count": 2,
       "step_days": 4
     },
     "CWB_CGH_2A1C_DIRECT": {
       "base": "2026-03-13",
       "min_dep": "2026-03-13",
-      "max_dep": "2026-03-13",
+      "max_dep": "2026-05-12",
       "count": 2
     },
     "NVT_GRU_1A": {
       "base": "2026-03-13",
       "min_dep": "2026-03-13",
-      "max_dep": "2026-03-13",
+      "max_dep": "2026-05-12",
       "count": 2
     }
   },
   "request_sleep_sec": 0.6,
-  "max_429_before_abort": 3
+  "max_429_before_abort": 3,
+  "status_counts": {
+    "429": 3
+  }
 }

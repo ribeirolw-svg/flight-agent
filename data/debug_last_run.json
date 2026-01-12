@@ -1,22 +1,27 @@
 {
-  "run_id": "20260112T185710Z",
+  "run_id": "20260112T200347Z",
+  "ts_utc": "2026-01-12T20:03:47Z",
+  "env": "test",
+  "max_results": 10,
+  "request_sleep_sec": 0.6,
+  "max_429_before_abort": 3,
   "expanded_ranges": {
     "ROMA_GRU_FCO_2A1C_DIRECT": {
       "min_dep": "2026-09-01",
-      "max_dep": "2026-09-05",
+      "max_dep": "2026-09-20",
       "count": 2,
       "step_days": 4
     },
     "CWB_CGH_2A1C_DIRECT": {
       "base": "2026-03-13",
       "min_dep": "2026-03-13",
-      "max_dep": "2026-03-13",
+      "max_dep": "2026-05-12",
       "count": 2
     },
     "NVT_GRU_1A": {
       "base": "2026-03-13",
       "min_dep": "2026-03-13",
-      "max_dep": "2026-03-13",
+      "max_dep": "2026-05-12",
       "count": 2
     }
   },
@@ -32,6 +37,8 @@
         "direct_only": true
       },
       "err": {
+        "_status": 429,
+        "body": "\n                {\n                    \"errors\": [\n                        {\n                            \"code\": 38195,\n                            \"title\": \"Quota limit exceeded\",\n                            \"detail\": \"The quota limit is exceeded\",\n                            \"status\": 429\n                        }\n                    ]\n                }\n            ",
         "errors": [
           {
             "code": 38195,
@@ -39,8 +46,7 @@
             "detail": "The quota limit is exceeded",
             "status": 429
           }
-        ],
-        "_status": 429
+        ]
       }
     },
     "CWB_CGH_2A1C_DIRECT": {
@@ -54,6 +60,8 @@
         "direct_only": true
       },
       "err": {
+        "_status": 429,
+        "body": "\n                {\n                    \"errors\": [\n                        {\n                            \"code\": 38195,\n                            \"title\": \"Quota limit exceeded\",\n                            \"detail\": \"The quota limit is exceeded\",\n                            \"status\": 429\n                        }\n                    ]\n                }\n            ",
         "errors": [
           {
             "code": 38195,
@@ -61,10 +69,12 @@
             "detail": "The quota limit is exceeded",
             "status": 429
           }
-        ],
-        "_status": 429
+        ]
       }
     }
   },
-  "offers_sample": {}
+  "offers_sample": {},
+  "status_counts": {
+    "429": 3
+  }
 }
