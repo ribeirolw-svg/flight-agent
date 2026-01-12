@@ -1,7 +1,6 @@
 routes:
   # ============================
-  # ROMA (imutável) — NÃO MEXER
-  # Janela: ida >= 01/09 e retorno <= 05/10, duração 15 dias
+  # ROMA (imutável)
   # ============================
   - id: ROMA_GRU_FCO_2A1C_DIRECT
     origin: "GRU"
@@ -16,15 +15,16 @@ routes:
       trip_days: 15
       start_mm_dd: [9, 1]
       latest_return_mm_dd: [10, 5]
+      # (opcional) cap de chamadas em ROMA também
+      max_pairs: 20
     watch:
       target_price_total: 13000
       max_stops: 0
 
-  # ==========================================
-  # CURITIBA — começa a procurar em D+60
-  # e varre uma janela de 60 dias
-  # sex/sáb -> dom/seg
-  # ==========================================
+  # ============================
+  # CURITIBA: começa em D+60 e varre 60 dias
+  # Mas capamos quantos pares vamos consultar (max_pairs)
+  # ============================
   - id: CWB_CGH_2A1C_DIRECT
     origin: "CGH"
     destination: "CWB"
@@ -37,20 +37,19 @@ routes:
     rule_params:
       start_offset_days: 60
       horizon_days: 60
-      depart_dows: [4, 5]   # sex, sab
-      return_dows: [6, 0]   # dom, seg
+      depart_dows: [4, 5]
+      return_dows: [6, 0]
       max_trip_len_days: 4
+      max_pairs: 16
     watch:
       target_price_total: 800
       max_stops: 0
 
-  # ==========================================
-  # NAVEGANTES — começa a procurar em D+60
-  # e varre uma janela de 60 dias
-  # sex/sáb -> dom/seg
-  # ==========================================
-  - id: NVT_GRU_1A
-    origin: "GRU"
+  # ============================
+  # NAVEGANTES: começa em D+60 e varre 60 dias
+  # ============================
+  - id: NVT_CGH_1A
+    origin: "CGH"
     destination: "NVT"
     adults: 1
     children: 0
@@ -64,5 +63,6 @@ routes:
       depart_dows: [4, 5]
       return_dows: [6, 0]
       max_trip_len_days: 4
+      max_pairs: 16
     watch:
       target_price_total: 350
