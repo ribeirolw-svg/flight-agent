@@ -1,13 +1,9 @@
-# routes.yaml (modelo final com REGRAS IMUTÁVEIS + ALERTAS + BEST-OFFER)
-# - Roma: ida >= 01/09, sempre 15 dias, retorno <= 05/10, SEM PARADAS, 2A+1C, alvo <= 13.000
-# - Curitiba: olhar 30 dias pra frente, ida Sex/Sáb, volta Dom/Seg, direto, 2A+1C, alvo <= 800
-# - Navegantes: olhar 30 dias pra frente, ida Sex/Sáb, volta Dom/Seg, (sem restrição de paradas aqui), 1A, alvo <= 350
-
 routes:
-  # =========================
-  # ROMA (GRU -> FCO)
-  # =========================
-  - id: "ROMA_GRU_FCO_2A1C_DIRECT"
+  # ----------------------------
+  # ROMA: regra imutável
+  # Janela: ida >= 01/09 e retorno <= 05/10, duração 15 dias
+  # ----------------------------
+  - id: ROMA_GRU_FCO_2A1C_DIRECT
     origin: "GRU"
     destination: "FCO"
     adults: 2
@@ -18,17 +14,17 @@ routes:
     rule: "ROME_15D_WINDOW"
     rule_params:
       trip_days: 15
-      start_mm_dd: [9, 1]          # 01/09
-      latest_return_mm_dd: [10, 5] # 05/10
+      start_mm_dd: [9, 1]
+      latest_return_mm_dd: [10, 5]
     watch:
       target_price_total: 13000
-      alert_drop_pct: 8
-      max_stops: 0                 # garante "sem paradas" também no best/alert
+      max_stops: 0
 
-  # =========================
-  # CURITIBA (CGH -> CWB)
-  # =========================
-  - id: "CWB_CGH_2A1C_DIRECT"
+  # ----------------------------
+  # CURITIBA: começa a procurar a partir de +60 dias
+  # e varre mais 60 dias (sex/sáb -> dom/seg)
+  # ----------------------------
+  - id: CWB_CGH_2A1C_DIRECT
     origin: "CGH"
     destination: "CWB"
     adults: 2
@@ -36,21 +32,23 @@ routes:
     cabin: "ECONOMY"
     currency: "BRL"
     direct_only: true
-    rule: "WEEKEND_30D"
+    rule: "WEEKEND_WINDOW"
     rule_params:
-      horizon_days: 30
-      depart_dows: [4, 5]          # Sex=4, Sáb=5
-      return_dows: [6, 0]          # Dom=6, Seg=0
+      start_offset_days: 60
+      horizon_days: 60
+      depart_dows: [4, 5]   # sex, sab
+      return_dows: [6, 0]   # dom, seg
       max_trip_len_days: 4
     watch:
       target_price_total: 800
-      alert_drop_pct: 10
-      max_stops: 0                 # direto
+      max_stops: 0
 
-  # =========================
-  # NAVEGANTES (GRU -> NVT)
-  # =========================
-  - id: "NVT_GRU_1A"
+  # ----------------------------
+  # NAVEGANTES: começa a procurar a partir de +60 dias
+  # e varre mais 60 dias (sex/sáb -> dom/seg)
+  # (1 adulto)
+  # ----------------------------
+  - id: NVT_GRU_1A
     origin: "GRU"
     destination: "NVT"
     adults: 1
@@ -58,12 +56,14 @@ routes:
     cabin: "ECONOMY"
     currency: "BRL"
     direct_only: false
-    rule: "WEEKEND_30D"
+    rule: "WEEKEND_WINDOW"
     rule_params:
-      horizon_days: 30
-      depart_dows: [4, 5]          # Sex=4, Sáb=5
-      return_dows: [6, 0]          # Dom=6, Seg=0
+      start_offset_days: 60
+      horizon_days: 60
+      depart_dows: [4, 5]
+      return_dows: [6, 0]
       max_trip_len_days: 4
     watch:
       target_price_total: 350
-      alert_drop_pct: 10
+      # (se quiser forçar sem paradas em NVT também, descomenta)
+      # max_stops: 0
