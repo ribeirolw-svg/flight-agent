@@ -21,7 +21,7 @@ except Exception:
 
 
 # =============================
-# Repo-root safe paths
+# Paths
 # =============================
 REPO_ROOT = Path(__file__).resolve().parent
 DATA_DIR = REPO_ROOT / "data"
@@ -138,12 +138,6 @@ def generate_weekend_pairs(
     return_dows: Tuple[int, int] = (6, 0),  # Dom(6) / Seg(0)
     max_trip_len_days: int = 4,
 ) -> List[Tuple[date, date]]:
-    """
-    Gera pares (ida, volta) dentro de uma janela:
-      - ida em Sex/Sáb
-      - volta em Dom/Seg
-      - duração <= max_trip_len_days
-    """
     end = base + timedelta(days=horizon_days)
     pairs = set()
     d = base
@@ -166,7 +160,7 @@ def expand_routes(routes_base: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     for r in routes_base:
         rule = (r.get("rule") or "").strip().upper()
 
-        # rota fixa (sem rule)
+        # ✅ Se tiver departure/return preenchidos, vira rota fixa (guardrail)
         if r.get("departure_date") and r.get("return_date") and not rule:
             expanded.append(r)
             continue
@@ -183,7 +177,6 @@ def expand_routes(routes_base: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                 latest_return_mm_dd=latest_return_mm_dd,  # type: ignore
                 trip_days=trip_days,
             )
-            # se já passou a janela no ano atual, tenta próximo ano
             if not pairs:
                 pairs = generate_rome_pairs(
                     year=today.year + 1,
@@ -206,6 +199,7 @@ def expand_routes(routes_base: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
             return_dows = tuple(params.get("return_dows", [6, 0]))
             max_trip_len_days = int(params.get("max_trip_len_days", 4))
 
+            # ✅ ESTE é o ponto: começa em D + offset
             base = today + timedelta(days=start_offset_days)
 
             pairs = generate_weekend_pairs(
@@ -223,8 +217,17 @@ def expand_routes(routes_base: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                 expanded.append(rr)
 
         else:
-            # sem datas e sem rule reconhecida
             continue
+
+    # ✅ LOG DE SANITY: mostra o range de datas por route_id
+    by_id: Dict[str, List[str]] = {}
+    for rr in expanded:
+        rid = str(rr.get("id") or route_key(rr))
+        by_id.setdefault(rid, []).append(rr["departure_date"])
+
+    for rid, deps in by_id.items():
+        deps_sorted = sorted(deps)
+        print(f"[INFO] Expanded range for {rid}: {deps_sorted[0]} .. {deps_sorted[-1]} ({len(deps_sorted)} departures)")
 
     return expanded
 
@@ -299,32 +302,44 @@ def amadeus_search_offers(
 
 
 # =============================
-# Offer normalization
+# Offer normalization (ROBUSTO)
 # =============================
-def normalize_offer(offer: Dict[str, Any]) -> Dict[str, Any]:
+def extract_price_total(offer: Dict[str, Any]) -> Optional[float]:
     """
-    Normaliza o offer do Amadeus (raw) para campos mínimos do best:
-      - price_total
-      - carrier
-      - stops
+    Extrai preço total de vários formatos possíveis.
     """
-    # preço
-    price = (
-        safe_float(offer.get("price_total"))
-        or safe_float(offer.get("total_price"))
-        or safe_float(offer.get("price"))
-        or safe_float(offer.get("total"))
-    )
-    if price is None:
-        # amadeus raw
-        try:
-            p = offer.get("price") or {}
-            if isinstance(p, dict):
-                price = safe_float(p.get("grandTotal")) or safe_float(p.get("total"))
-        except Exception:
-            pass
+    # campos diretos
+    for k in ("price_total", "total_price", "total", "price"):
+        if k in offer and offer.get(k) is not None and not isinstance(offer.get(k), dict):
+            v = safe_float(offer.get(k))
+            if v is not None:
+                return v
 
-    # cia
+    # amadeus raw: offer["price"]["grandTotal"] ou ["total"]
+    p = offer.get("price")
+    if isinstance(p, dict):
+        v = safe_float(p.get("grandTotal")) or safe_float(p.get("total"))
+        if v is not None:
+            return v
+
+    # alguns payloads podem ter "travelerPricings" com total (fallback fraco)
+    tp = offer.get("travelerPricings")
+    if isinstance(tp, list) and tp:
+        # tenta pegar o total do primeiro traveler (muitos retornam igual para todos)
+        first = tp[0] if isinstance(tp[0], dict) else None
+        if isinstance(first, dict):
+            price = first.get("price")
+            if isinstance(price, dict):
+                v = safe_float(price.get("total")) or safe_float(price.get("grandTotal"))
+                if v is not None:
+                    return v
+
+    return None
+
+
+def normalize_offer(offer: Dict[str, Any]) -> Dict[str, Any]:
+    price = extract_price_total(offer)
+
     carrier = offer.get("carrier") or offer.get("airline") or offer.get("validating_airline")
     if not carrier:
         vac = offer.get("validatingAirlineCodes")
@@ -335,10 +350,7 @@ def normalize_offer(offer: Dict[str, Any]) -> Dict[str, Any]:
         else:
             carrier = "?"
 
-    # stops
-    stops = offer.get("stops")
-    if stops is None:
-        stops = offer.get("number_of_stops")
+    stops = offer.get("stops") or offer.get("number_of_stops")
     if stops is None:
         try:
             stops_calc = 0
@@ -360,13 +372,8 @@ def normalize_offer(offer: Dict[str, Any]) -> Dict[str, Any]:
 # Best/Alerts persistence
 # =============================
 def load_prev_best() -> Dict[str, Any]:
-    """
-    best_offers.json pode estar vazio/corrompido (commit anterior, edição manual, etc).
-    Neste caso, NÃO quebra o workflow.
-    """
     if not BEST_FILE.exists():
         return {"by_route": {}}
-
     try:
         txt = BEST_FILE.read_text(encoding="utf-8").strip()
         if not txt:
@@ -405,7 +412,6 @@ def pick_best_offer(candidates: List[Dict[str, Any]], watch: Dict[str, Any]) -> 
         n["return_date"] = c.get("return_date")
         normed.append(n)
 
-    # filtros
     max_stops = watch.get("max_stops")
     if max_stops is not None:
         try:
@@ -474,7 +480,6 @@ def build_best_and_alerts(
         }
         best_by_route[rk] = best_payload
 
-        # alerts
         target = safe_float(watch.get("target_price_total"))
         if target is not None and best["price_total"] <= target:
             alerts.append(
