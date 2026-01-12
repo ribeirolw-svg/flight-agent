@@ -15,10 +15,7 @@ if str(APP_DIR) not in sys.path:
 
 from utilitario.history_store import HistoryStore
 from utilitario.analytics import (
-    load_events,
-    filter_events,
-    last_n_days,
-    count_by_type,
+    build_dashboard_snapshot,
     query_events_for_table,
 )
 
@@ -99,7 +96,7 @@ store_name = st.sidebar.text_input("Store", value="default").strip() or "default
 days = st.sidebar.slider("Janela (dias)", 1, 365, 30)
 
 # type
-type_filter_str = st.sidebar.text_input("Type (vírgula, opcional)", value="").strip()
+type_filter_str = st.sidebar.text_input("Type (vírgula, opcional)", value="flight_search").strip()
 type_filter = [t.strip() for t in type_filter_str.split(",") if t.strip()] if type_filter_str else None
 
 # rota
@@ -115,14 +112,10 @@ st.sidebar.divider()
 # -----------------------------
 # Carregar dados
 # -----------------------------
-store = HistoryStore(store_name)
-
-# usando query_events_for_table (mais simples pro dataframe)
 rows = query_events_for_table(
     store_name=store_name,
     event_types=type_filter,
     days=days,
-    payload_contains=None,  # filtros finos fazemos via pandas abaixo
     limit=5000,
 )
 
@@ -193,13 +186,13 @@ with c2:
 st.divider()
 
 # -----------------------------
-# Melhores preços por rota (se tiver preço)
+# Melhores preços por rota
 # -----------------------------
-st.subheader("💸 Melhor preço por rota (se disponível)")
+st.subheader("💸 Melhor preço por rota")
 if df.empty:
     st.info("Sem dados.")
 elif df["best_price"].dropna().empty:
-    st.info("Não encontrei campo de preço no payload. Se você me disser qual chave guarda o preço, eu ajusto.")
+    st.info("Não encontrei campo de preço no payload.")
 else:
     best = (
         df.dropna(subset=["best_price"])
@@ -212,14 +205,13 @@ else:
 st.divider()
 
 # -----------------------------
-# Tabela principal (limpa)
+# Tabela principal
 # -----------------------------
 st.subheader("🧾 Eventos (tabela limpa)")
 
 if df.empty:
     st.info("Nada encontrado com os filtros atuais.")
 else:
-    # seleciona colunas úteis (se existirem)
     cols = [
         "ts_utc",
         "type",
@@ -238,7 +230,30 @@ else:
 
     st.download_button(
         "⬇️ Baixar JSONL filtrado",
-        data="\n".join(json.dumps(r, ensure_ascii=False) for r in df.drop(columns=["ts_utc_dt"], errors="ignore").to_dict(orient="records")),
+        data="\n".join(json.dumps(r, ensure_ascii=False) for r in df[cols].to_dict(orient="records")),
         file_name=f"{store_name}_filtered_{days}d.jsonl",
         mime="application/json",
     )
+
+# -----------------------------
+# Teste manual rápido
+# -----------------------------
+st.sidebar.divider()
+st.sidebar.subheader("Teste manual")
+
+store = HistoryStore(store_name)
+if st.sidebar.button("Append exemplo"):
+    store.append(
+        "flight_search",
+        {
+            "run_id": "manual-test",
+            "origin": "CGH",
+            "destination": "CWB",
+            "currency": "BRL",
+            "offers_count": 12,
+            "best_price": 399.90,
+            "direct_only": True,
+            "error": None,
+        },
+    )
+    st.sidebar.success("Evento de teste gravado.")
