@@ -3,7 +3,6 @@ name: Flight Agent - Update Data
 on:
   workflow_dispatch:
   schedule:
-    # todo dia 09:15 UTC (06:15 Brasil - São Paulo em horário padrão)
     - cron: "15 9 * * *"
 
 permissions:
@@ -11,7 +10,7 @@ permissions:
 
 concurrency:
   group: flight-agent-update
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   update:
@@ -20,6 +19,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # ✅ necessário pra rebase
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -40,13 +41,13 @@ jobs:
           AMADEUS_CLIENT_SECRET: ${{ secrets.AMADEUS_CLIENT_SECRET }}
           AMADEUS_ENV: test
           MAX_RESULTS: "10"
-          # ✅ Anti-429: reduz pressão na API
           REQUEST_SLEEP_SEC: "0.60"
-          # ✅ Anti-429: se começar a tomar 429 em sequência, aborta cedo
           MAX_429_BEFORE_ABORT: "3"
 
-      - name: Commit artifacts
+      - name: Commit & Push artifacts (rebase-safe)
         run: |
+          set -e
+
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
@@ -61,7 +62,27 @@ jobs:
             data/debug_last_run.json \
             || true
 
-          git diff --cached --quiet && echo "No changes to commit" && exit 0
+          if git diff --cached --quiet; then
+            echo "No changes to commit"
+            exit 0
+          fi
 
           git commit -m "Update flight data (auto)"
-          git push
+
+          # ✅ tenta 3x: rebase e push
+          for i in 1 2 3; do
+            echo "Push attempt $i/3..."
+            git fetch origin main
+            git rebase origin/main || (git rebase --abort && git pull --rebase origin main)
+
+            if git push origin HEAD:main; then
+              echo "Push succeeded"
+              exit 0
+            fi
+
+            echo "Push failed, retrying in 2s..."
+            sleep 2
+          done
+
+          echo "Push failed after 3 attempts."
+          exit 1
