@@ -1,30 +1,34 @@
 routes:
+  # --- REGRA IMUTÁVEL: Roma (FCO) sempre set/out ---
   - origin: "GRU"
     destination: "FCO"
-    departure_date: "2026-01-30"
-    return_date: "2026-02-02"
+    departure_date: "2026-09-10"
+    return_date: "2026-09-24"
     adults: 2
     children: 1
-    cabin: "ECONOMY"
-    currency: "BRL"
-    direct_only: true
-
-  - origin: "CGH"
-    destination: "CWB"
-    departure_date: "2026-01-30"
-    return_date: "2026-02-02"
-    adults: 2
-    children: 1
-    cabin: "ECONOMY"
-    currency: "BRL"
-    direct_only: true
-
-  - origin: "GRU"
-    destination: "MIA"
-    departure_date: "2026-03-10"
-    return_date: "2026-03-20"
-    adults: 1
-    children: 0
     cabin: "ECONOMY"
     currency: "BRL"
     direct_only: false
+
+  - origin: "GRU"
+    destination: "FCO"
+    departure_date: "2026-09-24"
+    return_date: "2026-10-08"
+    adults: 2
+    children: 1
+    cabin: "ECONOMY"
+    currency: "BRL"
+    direct_only: false
+
+  - origin: "GRU"
+    destination: "FCO"
+    departure_date: "2026-10-08"
+    return_date: "2026-10-22"
+    adults: 2
+    children: 1
+    cabin: "ECONOMY"
+    currency: "BRL"
+    direct_only: false
+
+  # --- REGRA IMUTÁVEL: Curitiba (CWB) ---
+  - origin: "CGH"
