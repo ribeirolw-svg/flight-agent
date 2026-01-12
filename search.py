@@ -1,15 +1,29 @@
 from __future__ import annotations
 
+import os
+import sys
 import time
 import uuid
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 
-from utilitario.history_store import HistoryStore
+# -------------------------------------------------------------------
+# PATH FIX: search.py está na raiz, mas utilitario está em /app
+# -------------------------------------------------------------------
+ROOT_DIR = Path(__file__).resolve().parent
+APP_DIR = ROOT_DIR / "app"
+if str(APP_DIR) not in sys.path:
+    sys.path.insert(0, str(APP_DIR))
+
+from utilitario.history_store import HistoryStore  # noqa: E402
 
 
-BASE_URL = "https://test.api.amadeus.com"
+# -------------------------------------------------------------------
+# Amadeus endpoints
+# -------------------------------------------------------------------
+BASE_URL = os.environ.get("AMADEUS_BASE_URL", "https://test.api.amadeus.com").strip()
 TOKEN_URL = f"{BASE_URL}/v1/security/oauth2/token"
 FLIGHT_OFFERS_URL = f"{BASE_URL}/v2/shopping/flight-offers"
 
@@ -28,42 +42,52 @@ def amadeus_get_token(client_id: str, client_secret: str) -> str:
     return resp.json()["access_token"]
 
 
-def _extract_best_price_currency(offers_data: Any) -> Tuple[Optional[float], Optional[str], int]:
-    """
-    Tenta extrair:
-    - menor preço (best_price)
-    - currency
-    - offers_count
+def _to_float(x: Any) -> Optional[float]:
+    if x is None:
+        return None
+    try:
+        if isinstance(x, str):
+            return float(x.strip().replace(",", "."))
+        if isinstance(x, (int, float)):
+            return float(x)
+    except Exception:
+        return None
+    return None
 
-    Funciona para payloads padrão do Amadeus: {"data":[...]}
+
+def _extract_best_price_currency_offerscount(payload: Any) -> Tuple[Optional[float], Optional[str], int]:
     """
-    if not isinstance(offers_data, dict):
+    Extrai:
+      - best_price (menor grandTotal/total)
+      - currency (se houver)
+      - offers_count
+    Espera payload padrão Amadeus: {"data":[{...offer...}, ...]}
+    """
+    if not isinstance(payload, dict):
         return None, None, 0
 
-    data = offers_data.get("data")
+    data = payload.get("data")
     if not isinstance(data, list):
         return None, None, 0
 
     best: Optional[float] = None
-    cur: Optional[str] = None
-    count = len(data)
+    currency: Optional[str] = None
+    offers_count = len(data)
 
-    for offer in data[:300]:
+    # Limita iteração (segurança/perf)
+    for offer in data[:500]:
         if not isinstance(offer, dict):
             continue
+
         price = offer.get("price")
         if isinstance(price, dict):
-            cur = cur or price.get("currency")
+            currency = currency or price.get("currency")
             gt = price.get("grandTotal") or price.get("total")
-            try:
-                if gt is not None:
-                    v = float(str(gt).replace(",", "."))
-                    if best is None or v < best:
-                        best = v
-            except Exception:
-                pass
+            v = _to_float(gt)
+            if v is not None:
+                best = v if best is None else min(best, v)
 
-    return best, cur, count
+    return best, currency, offers_count
 
 
 def amadeus_search_offers(
@@ -77,6 +101,7 @@ def amadeus_search_offers(
     cabin: str = "ECONOMY",
     currency: str = "BRL",
     direct_only: bool = True,
+    max_results: int = 50,
 ) -> Dict[str, Any]:
     params: Dict[str, Any] = {
         "originLocationCode": origin,
@@ -86,7 +111,7 @@ def amadeus_search_offers(
         "travelClass": cabin,
         "currencyCode": currency,
         "nonStop": "true" if direct_only else "false",
-        "max": 50,
+        "max": max_results,
     }
     if children:
         params["children"] = children
@@ -94,7 +119,6 @@ def amadeus_search_offers(
         params["returnDate"] = return_date
 
     headers = {"Authorization": f"Bearer {token}"}
-
     resp = requests.get(FLIGHT_OFFERS_URL, headers=headers, params=params, timeout=60)
     resp.raise_for_status()
     return resp.json()
@@ -114,17 +138,22 @@ def run_search_and_store(
     cabin: str,
     currency: str,
     direct_only: bool,
+    max_results: int = 50,
+    save_raw: bool = False,
 ) -> Dict[str, Any]:
     """
-    Executa a busca e grava SEMPRE no histórico um payload achatado (útil pro dashboard).
+    Executa a busca e grava SEMPRE no histórico um payload 'achatado' para o dashboard:
+      origin, destination, best_price, offers_count, currency, error, etc.
+
+    Retorna o payload gravado.
     """
     store = HistoryStore(store_name)
     run_id = uuid.uuid4().hex[:12]
-
     t0 = time.time()
+
     try:
         token = amadeus_get_token(client_id, client_secret)
-        offers = amadeus_search_offers(
+        offers_payload = amadeus_search_offers(
             token=token,
             origin=origin,
             destination=destination,
@@ -135,10 +164,12 @@ def run_search_and_store(
             cabin=cabin,
             currency=currency,
             direct_only=direct_only,
+            max_results=max_results,
         )
-        best_price, detected_currency, offers_count = _extract_best_price_currency(offers)
 
-        payload = {
+        best_price, detected_currency, offers_count = _extract_best_price_currency_offerscount(offers_payload)
+
+        payload: Dict[str, Any] = {
             "run_id": run_id,
             "origin": origin,
             "destination": destination,
@@ -155,8 +186,8 @@ def run_search_and_store(
             "error": None,
         }
 
-        # opcional: guarda o raw (se quiser)
-        # payload["raw"] = offers
+        if save_raw:
+            payload["raw"] = offers_payload  # opcional (pesa o jsonl)
 
         store.append("flight_search", payload)
         return payload
