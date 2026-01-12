@@ -18,7 +18,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout repo
+      - name: Checkout
         uses: actions/checkout@v4
 
       - name: Set up Python
@@ -29,43 +29,39 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          if [ -f requirements.txt ]; then
-            pip install -r requirements.txt
-          else
-            pip install requests pyyaml pandas
-          fi
+          pip install -r requirements.txt
 
       - name: Run scheduler
+        run: |
+          echo "Running scheduler..."
+          python scheduler.py
         env:
           AMADEUS_CLIENT_ID: ${{ secrets.AMADEUS_CLIENT_ID }}
           AMADEUS_CLIENT_SECRET: ${{ secrets.AMADEUS_CLIENT_SECRET }}
           AMADEUS_ENV: test
           MAX_RESULTS: "10"
-        run: |
-          echo "Running scheduler..."
-          python scheduler.py
+          # ✅ throttling para reduzir 429
+          REQUEST_SLEEP_SEC: "0.35"
+          # ✅ aborta cedo se entrar em espiral de 429
+          MAX_429_BEFORE_ABORT: "6"
 
-      - name: Debug data folder
-        run: |
-          echo "Listing data/ folder:"
-          ls -la data || true
-
-      - name: Commit changes
+      - name: Commit artifacts
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
           mkdir -p data
 
-          # Adiciona TODOS os artefatos
+          # Persistência dos artefatos gerados
           git add \
             data/state.json \
             data/summary.md \
             data/history.jsonl \
+            data/best_offers.json \
             data/alerts.json \
-            data/best_offers.json || true
+            data/debug_last_run.json \
+            || true
 
-          # Se não houve mudança, não falha
           git diff --cached --quiet && echo "No changes to commit" && exit 0
 
           git commit -m "Update flight data (auto)"
