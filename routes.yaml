@@ -1,5 +1,4 @@
 routes:
-  # ROMA — regra imutável
   - id: "ROMA_GRU_FCO_2A1C_DIRECT"
     origin: "GRU"
     destination: "FCO"
@@ -11,14 +10,13 @@ routes:
     rule: "ROME_15D_WINDOW"
     rule_params:
       trip_days: 15
-      start_mm_dd: [9, 1]   # 01/09
-      latest_return_mm_dd: [10, 5]  # 05/10
+      start_mm_dd: [9, 1]
+      latest_return_mm_dd: [10, 5]
     watch:
       target_price_total: 13000
       alert_drop_pct: 8
       max_stops: 0
 
-  # CURITIBA — regra imutável (30d, ida sex/sáb, volta dom/seg)
   - id: "CWB_CGH_2A1C_DIRECT"
     origin: "CGH"
     destination: "CWB"
@@ -30,15 +28,14 @@ routes:
     rule: "WEEKEND_30D"
     rule_params:
       horizon_days: 30
-      depart_dows: [4, 5]   # sex=4 sáb=5
-      return_dows: [6, 0]   # dom=6 seg=0
+      depart_dows: [4, 5]
+      return_dows: [6, 0]
       max_trip_len_days: 4
     watch:
       target_price_total: 800
       alert_drop_pct: 10
       max_stops: 0
 
-  # NAVEGANTES — mesma regra (30d) mas 1 adulto e alvo 350
   - id: "NVT_GRU_1A"
     origin: "GRU"
     destination: "NVT"
