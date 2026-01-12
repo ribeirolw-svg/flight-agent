@@ -24,7 +24,6 @@ except Exception:
 # Repo-root safe paths
 # =============================
 REPO_ROOT = Path(__file__).resolve().parent
-
 DATA_DIR = REPO_ROOT / "data"
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -37,7 +36,6 @@ BEST_FILE = DATA_DIR / "best_offers.json"
 ALERTS_FILE = DATA_DIR / "alerts.json"
 
 TZ_NAME = "America/Sao_Paulo"
-
 DEFAULT_MAX_RESULTS = int(os.getenv("MAX_RESULTS", "10"))
 
 AMADEUS_TEST_BASE = "https://test.api.amadeus.com"
@@ -135,11 +133,17 @@ def generate_rome_pairs(
 
 def generate_weekend_pairs(
     base: date,
-    horizon_days: int = 30,
+    horizon_days: int,
     depart_dows: Tuple[int, int] = (4, 5),  # Sex(4) / Sáb(5)
     return_dows: Tuple[int, int] = (6, 0),  # Dom(6) / Seg(0)
     max_trip_len_days: int = 4,
 ) -> List[Tuple[date, date]]:
+    """
+    Gera pares (ida, volta) dentro de uma janela:
+      - ida em Sex/Sáb
+      - volta em Dom/Seg
+      - duração <= max_trip_len_days
+    """
     end = base + timedelta(days=horizon_days)
     pairs = set()
     d = base
@@ -162,7 +166,7 @@ def expand_routes(routes_base: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     for r in routes_base:
         rule = (r.get("rule") or "").strip().upper()
 
-        # rota fixa
+        # rota fixa (sem rule)
         if r.get("departure_date") and r.get("return_date") and not rule:
             expanded.append(r)
             continue
@@ -179,6 +183,7 @@ def expand_routes(routes_base: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                 latest_return_mm_dd=latest_return_mm_dd,  # type: ignore
                 trip_days=trip_days,
             )
+            # se já passou a janela no ano atual, tenta próximo ano
             if not pairs:
                 pairs = generate_rome_pairs(
                     year=today.year + 1,
@@ -193,15 +198,18 @@ def expand_routes(routes_base: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                 rr["return_date"] = ret.isoformat()
                 expanded.append(rr)
 
-        elif rule == "WEEKEND_30D":
+        elif rule in ("WEEKEND_WINDOW", "WEEKEND_30D"):
             params = r.get("rule_params") or {}
+            start_offset_days = int(params.get("start_offset_days", 0))
             horizon_days = int(params.get("horizon_days", 30))
             depart_dows = tuple(params.get("depart_dows", [4, 5]))
             return_dows = tuple(params.get("return_dows", [6, 0]))
             max_trip_len_days = int(params.get("max_trip_len_days", 4))
 
+            base = today + timedelta(days=start_offset_days)
+
             pairs = generate_weekend_pairs(
-                base=today,
+                base=base,
                 horizon_days=horizon_days,
                 depart_dows=depart_dows,  # type: ignore
                 return_dows=return_dows,  # type: ignore
@@ -215,6 +223,7 @@ def expand_routes(routes_base: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                 expanded.append(rr)
 
         else:
+            # sem datas e sem rule reconhecida
             continue
 
     return expanded
@@ -290,9 +299,16 @@ def amadeus_search_offers(
 
 
 # =============================
-# Offer normalization (fix NULL)
+# Offer normalization
 # =============================
 def normalize_offer(offer: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Normaliza o offer do Amadeus (raw) para campos mínimos do best:
+      - price_total
+      - carrier
+      - stops
+    """
+    # preço
     price = (
         safe_float(offer.get("price_total"))
         or safe_float(offer.get("total_price"))
@@ -300,8 +316,15 @@ def normalize_offer(offer: Dict[str, Any]) -> Dict[str, Any]:
         or safe_float(offer.get("total"))
     )
     if price is None:
-        price = safe_float((offer.get("price") or {}).get("grandTotal"))
+        # amadeus raw
+        try:
+            p = offer.get("price") or {}
+            if isinstance(p, dict):
+                price = safe_float(p.get("grandTotal")) or safe_float(p.get("total"))
+        except Exception:
+            pass
 
+    # cia
     carrier = offer.get("carrier") or offer.get("airline") or offer.get("validating_airline")
     if not carrier:
         vac = offer.get("validatingAirlineCodes")
@@ -312,6 +335,7 @@ def normalize_offer(offer: Dict[str, Any]) -> Dict[str, Any]:
         else:
             carrier = "?"
 
+    # stops
     stops = offer.get("stops")
     if stops is None:
         stops = offer.get("number_of_stops")
@@ -324,7 +348,6 @@ def normalize_offer(offer: Dict[str, Any]) -> Dict[str, Any]:
             stops = stops_calc
         except Exception:
             stops = 99
-
     try:
         stops = int(stops)
     except Exception:
@@ -338,9 +361,8 @@ def normalize_offer(offer: Dict[str, Any]) -> Dict[str, Any]:
 # =============================
 def load_prev_best() -> Dict[str, Any]:
     """
-    FIX CRÍTICO:
     best_offers.json pode estar vazio/corrompido (commit anterior, edição manual, etc).
-    Neste caso, NÃO quebra o workflow: volta vazio e segue.
+    Neste caso, NÃO quebra o workflow.
     """
     if not BEST_FILE.exists():
         return {"by_route": {}}
@@ -371,7 +393,7 @@ def save_alerts(run_id: str, alerts: List[Dict[str, Any]]) -> None:
 
 
 def pick_best_offer(candidates: List[Dict[str, Any]], watch: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    normed = []
+    normed: List[Dict[str, Any]] = []
     for c in candidates:
         offer = c.get("offer")
         if not isinstance(offer, dict) or "_error" in offer:
@@ -383,6 +405,7 @@ def pick_best_offer(candidates: List[Dict[str, Any]], watch: Dict[str, Any]) -> 
         n["return_date"] = c.get("return_date")
         normed.append(n)
 
+    # filtros
     max_stops = watch.get("max_stops")
     if max_stops is not None:
         try:
@@ -451,6 +474,7 @@ def build_best_and_alerts(
         }
         best_by_route[rk] = best_payload
 
+        # alerts
         target = safe_float(watch.get("target_price_total"))
         if target is not None and best["price_total"] <= target:
             alerts.append(
@@ -634,14 +658,6 @@ def main() -> None:
     }
     save_state(state)
 
-    sample_lines = []
-    for rk, b in list(best_by_route.items())[:3]:
-        if b and b.get("price_total") is not None:
-            sample_lines.append(
-                f'- {b["origin"]}->{b["destination"]} {b.get("departure_date")}/{b.get("return_date")} | '
-                f'{b.get("carrier","?")} | BRL {b["price_total"]:.2f} | {b.get("stops", "?")} stop(s)'
-            )
-
     summary = f"""# Flight Agent — Update Summary
 
 - started_utc: `{state["started_utc"]}`
@@ -657,9 +673,6 @@ def main() -> None:
 - amadeus_env: `{state["amadeus_env"]}`
 - immutable_required_origins: `{state["immutable_required_origins"]}`
 - immutable_required_dests: `{state["immutable_required_dests"]}`
-
-## Sample offers (preview)
-{chr(10).join(sample_lines) if sample_lines else "- (no samples)"}
 
 [OK] Run completed successfully.
 """
