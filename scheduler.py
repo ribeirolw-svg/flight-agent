@@ -4,13 +4,11 @@ from __future__ import annotations
 import json
 import os
 import sys
-import time
-import traceback
 from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set
 
 import yaml
 
@@ -23,6 +21,13 @@ ALERTS_FILE = os.getenv("ALERTS_FILE", "alerts.yaml")  # mantido p/ compatibilid
 STORE_NAME = os.getenv("STORE_NAME", "default")
 MAX_RESULTS = int(os.getenv("AMADEUS_MAX_RESULTS", "10"))
 AMADEUS_ENV = os.getenv("AMADEUS_ENV", "").strip().lower() or "test"  # evita vazio
+
+# =========================
+# Guardrails (regras imutáveis)
+# =========================
+# Origens e destinos obrigatórios que NÃO PODEM SUMIR sem você pedir.
+REQUIRED_ORIGINS: Set[str] = {"GRU", "CGH"}
+REQUIRED_DESTS: Set[str] = {"FCO", "CWB", "NVT"}
 
 # =========================
 # Paths (artefatos)
@@ -42,12 +47,10 @@ def utc_now() -> datetime:
 
 
 def iso_z(dt: datetime) -> str:
-    # ISO-8601 com Z
     return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def run_id_from_dt(dt: datetime) -> str:
-    # Ex.: 20260112T095849Z
     return dt.astimezone(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
 
 
@@ -79,9 +82,6 @@ def safe_str(e: BaseException) -> str:
 
 
 def extract_error_code(message: str) -> str:
-    """
-    Heurística simples: tenta mapear os erros mais comuns sem depender do requests.
-    """
     m = message.lower()
     if "401" in m or "unauthorized" in m or "invalid_client" in m:
         return "HTTP_401"
@@ -107,46 +107,60 @@ def extract_error_code(message: str) -> str:
 
 
 def summarize_offer_for_log(offer: Dict[str, Any]) -> str:
-    """
-    Tentativa de criar uma linha curta (não quebra se o formato variar).
-    """
-    # Preço
     price = ""
+    currency = ""
+    carrier = ""
+    stops = ""
+
     try:
         price = str(offer.get("price", {}).get("total") or offer.get("price", {}).get("grandTotal") or "")
     except Exception:
         price = ""
-    # Moeda (às vezes price.currency)
-    currency = ""
+
     try:
         currency = str(offer.get("price", {}).get("currency") or "")
     except Exception:
         currency = ""
 
-    # Carrier (depende do formato)
-    carrier = ""
     try:
-        # Alguns retornos têm "validatingAirlineCodes": ["LA"]
         vac = offer.get("validatingAirlineCodes")
         if isinstance(vac, list) and vac:
             carrier = str(vac[0])
     except Exception:
         carrier = ""
 
-    # Stops / segments
-    stops = ""
     try:
         itins = offer.get("itineraries")
         if isinstance(itins, list) and itins:
             segs = itins[0].get("segments", [])
             if isinstance(segs, list) and len(segs) > 0:
-                # stops = segmentos - 1
-                stops = f"{max(len(segs)-1, 0)} stop(s)"
+                stops = f"{max(len(segs) - 1, 0)} stop(s)"
     except Exception:
         stops = ""
 
     bits = [b for b in [carrier, (f"{currency} {price}".strip()), stops] if b]
     return " | ".join(bits) if bits else "offer"
+
+
+def offer_signature(route_meta: Dict[str, Any], offer: Dict[str, Any]) -> str:
+    carrier = ""
+    try:
+        vac = offer.get("validatingAirlineCodes")
+        if isinstance(vac, list) and vac:
+            carrier = str(vac[0])
+    except Exception:
+        carrier = ""
+
+    price = ""
+    try:
+        price = str(offer.get("price", {}).get("total") or offer.get("price", {}).get("grandTotal") or "")
+    except Exception:
+        price = ""
+
+    return (
+        f"{route_meta.get('origin')}->{route_meta.get('destination')}|"
+        f"{route_meta.get('departure_date')}|{route_meta.get('return_date')}|{carrier}|{price}"
+    )
 
 
 # =========================
@@ -156,7 +170,6 @@ def import_search_callable():
     """
     Espera existir search.py com a função:
       search_offers_for_route(route: dict, *, max_results: int, env: str) -> list[dict]
-    Se o teu search tiver outro nome, me fala que eu ajusto, mas isso aqui já cobre o padrão.
     """
     try:
         import search  # type: ignore
@@ -185,6 +198,28 @@ class CallResult:
     err_msg: Optional[str] = None
 
 
+def validate_immutable_rules(routes: List[Dict[str, Any]]) -> None:
+    """
+    Guardrail: se origens/destinos obrigatórios sumirem do routes.yaml, falha imediatamente.
+    """
+    origins_in_yaml = {r.get("origin") for r in routes if isinstance(r, dict)}
+    dests_in_yaml = {r.get("destination") for r in routes if isinstance(r, dict)}
+
+    origins_clean = {o for o in origins_in_yaml if isinstance(o, str) and o.strip()}
+    dests_clean = {d for d in dests_in_yaml if isinstance(d, str) and d.strip()}
+
+    missing_o = REQUIRED_ORIGINS - origins_clean
+    missing_d = REQUIRED_DESTS - dests_clean
+
+    if missing_o or missing_d:
+        print("[FATAL] routes.yaml violou regras imutáveis.")
+        if missing_o:
+            print(f"[FATAL] Origens faltando: {sorted(missing_o)}")
+        if missing_d:
+            print(f"[FATAL] Destinos faltando: {sorted(missing_d)}")
+        sys.exit(1)
+
+
 def main() -> None:
     ensure_dirs()
 
@@ -192,13 +227,13 @@ def main() -> None:
     started_utc = iso_z(started_dt)
     rid = run_id_from_dt(started_dt)
 
-    # stats
     total_calls = 0
     ok_calls = 0
     err_calls = 0
     offers_saved = 0
     errors: List[Dict[str, Any]] = []
     sample_offers: List[str] = []
+    sample_seen: Set[str] = set()
 
     # load routes
     try:
@@ -212,6 +247,9 @@ def main() -> None:
         print(f"[FATAL] Nenhuma rota encontrada em {ROUTES_FILE}. Esperava chave 'routes:'.")
         sys.exit(1)
 
+    # Guardrail IMEDIATO (antes de gastar chamadas)
+    validate_immutable_rules(routes)
+
     # import search callable
     try:
         search_fn = import_search_callable()
@@ -223,11 +261,9 @@ def main() -> None:
     print(f"[INFO] Store: {STORE_NAME} | Env: {AMADEUS_ENV} | Max results: {MAX_RESULTS}")
     print(f"[INFO] Routes: {len(routes)} | Routes file: {ROUTES_FILE}")
 
-    # execute
     for i, route in enumerate(routes, start=1):
         total_calls += 1
 
-        # enrich route meta
         route_meta = {
             "idx": i,
             "origin": route.get("origin"),
@@ -249,7 +285,6 @@ def main() -> None:
             ok_calls += 1
             offers_count = len(offers)
 
-            # persist offers as jsonl
             for off in offers:
                 if not isinstance(off, dict):
                     continue
@@ -262,16 +297,21 @@ def main() -> None:
                 append_jsonl(HISTORY_PATH, record)
                 offers_saved += 1
 
-                # collect small samples for log (max 3)
+                # sample únicos (até 3)
                 if len(sample_offers) < 3:
-                    sample_offers.append(
-                        f"{route_meta.get('origin')}->{route_meta.get('destination')} "
-                        f"{route_meta.get('departure_date')}/{route_meta.get('return_date')} | "
-                        f"{summarize_offer_for_log(off)}"
-                    )
+                    sig = offer_signature(route_meta, off)
+                    if sig not in sample_seen:
+                        sample_seen.add(sig)
+                        sample_offers.append(
+                            f"{route_meta.get('origin')}->{route_meta.get('destination')} "
+                            f"{route_meta.get('departure_date')}/{route_meta.get('return_date')} | "
+                            f"{summarize_offer_for_log(off)}"
+                        )
 
-            print(f"[OK] ({i}/{len(routes)}) {route_meta.get('origin')}->{route_meta.get('destination')} "
-                  f"{route_meta.get('departure_date')}/{route_meta.get('return_date')} | offers: {offers_count}")
+            print(
+                f"[OK] ({i}/{len(routes)}) {route_meta.get('origin')}->{route_meta.get('destination')} "
+                f"{route_meta.get('departure_date')}/{route_meta.get('return_date')} | offers: {offers_count}"
+            )
 
         except Exception as e:
             err_calls += 1
@@ -285,11 +325,10 @@ def main() -> None:
                 "message": msg,
             })
 
-            # log curto, stack em run file
-            print(f"[ERR] ({i}/{len(routes)}) {route_meta.get('origin')}->{route_meta.get('destination')} "
-                  f"{route_meta.get('departure_date')}/{route_meta.get('return_date')} | {code} | {msg}")
-
-            # segue para próxima rota (não explode run inteira)
+            print(
+                f"[ERR] ({i}/{len(routes)}) {route_meta.get('origin')}->{route_meta.get('destination')} "
+                f"{route_meta.get('departure_date')}/{route_meta.get('return_date')} | {code} | {msg}"
+            )
             continue
 
     finished_dt = utc_now()
@@ -297,7 +336,6 @@ def main() -> None:
     duration_sec = int((finished_dt - started_dt).total_seconds())
     success_rate = (ok_calls / total_calls) if total_calls else 0.0
 
-    # top errors
     top_errors = Counter([e.get("code", "ERR_UNKNOWN") for e in errors])
 
     # state.json (compacto)
@@ -305,6 +343,9 @@ def main() -> None:
         "store": STORE_NAME,
         "env": AMADEUS_ENV,
         "max_results": MAX_RESULTS,
+        "routes_file": ROUTES_FILE,
+        "immutable_required_origins": sorted(REQUIRED_ORIGINS),
+        "immutable_required_dests": sorted(REQUIRED_DESTS),
         "last_run": {
             "run_id": rid,
             "started_utc": started_utc,
@@ -319,8 +360,7 @@ def main() -> None:
     }
     write_json(STATE_PATH, state)
 
-    # alerts.json (placeholder seguro — mantém compatibilidade)
-    # (Na Etapa 1 a gente implementa o engine real.)
+    # alerts.json (placeholder)
     if not ALERTS_PATH.exists():
         write_json(ALERTS_PATH, {"alerts": [], "generated_utc": finished_utc})
 
@@ -333,6 +373,9 @@ def main() -> None:
         "store": STORE_NAME,
         "env": AMADEUS_ENV,
         "max_results": MAX_RESULTS,
+        "routes_file": ROUTES_FILE,
+        "immutable_required_origins": sorted(REQUIRED_ORIGINS),
+        "immutable_required_dests": sorted(REQUIRED_DESTS),
         "total_calls": total_calls,
         "ok_calls": ok_calls,
         "err_calls": err_calls,
@@ -342,11 +385,10 @@ def main() -> None:
         "top_errors": dict(top_errors),
         "errors": errors,
         "samples": sample_offers,
-        "traceback_hint": "Veja 'errors' para mensagens. Stacktrace completo não é persistido por segurança; se quiser, eu adiciono.",
     }
     write_json(RUNS_DIR / f"{rid}.json", run_log)
 
-    # summary.md (mantém teu formato e adiciona campos úteis)
+    # summary.md
     summary_lines = [
         "# Flight Agent — Update Summary",
         "",
@@ -361,6 +403,8 @@ def main() -> None:
         f"- store: `{STORE_NAME}`",
         f"- max_results: `{MAX_RESULTS}`",
         f"- amadeus_env: `{AMADEUS_ENV}`",
+        f"- immutable_required_origins: `{sorted(REQUIRED_ORIGINS)}`",
+        f"- immutable_required_dests: `{sorted(REQUIRED_DESTS)}`",
         "",
     ]
 
@@ -378,12 +422,10 @@ def main() -> None:
 
     write_text(SUMMARY_MD_PATH, "\n".join(summary_lines).rstrip() + "\n")
 
-    # stdout summary (visível no Actions)
+    # stdout summary
     print("\n" + "\n".join(summary_lines).rstrip())
 
-    # ============
     # Anti "GREEN mentiroso"
-    # ============
     if err_calls > 0 or ok_calls == 0 or offers_saved == 0:
         print("\n[FAIL] Run completed with issues (green mentiroso guard enabled).")
         print(f"[FAIL] err_calls={err_calls}, ok_calls={ok_calls}, offers_saved={offers_saved}")
