@@ -1,5 +1,5 @@
 {
-  "run_id": "20260112T173350Z",
+  "run_id": "20260112T174518Z",
   "expanded_ranges": {
     "ROMA_GRU_FCO_2A1C_DIRECT": {
       "min_dep": "2026-09-01",
@@ -13,7 +13,7 @@
       "max_dep": "2026-04-04",
       "count": 16
     },
-    "NVT_CGH_1A": {
+    "NVT_GRU_1A": {
       "base": "2026-03-13",
       "min_dep": "2026-03-13",
       "max_dep": "2026-04-04",
