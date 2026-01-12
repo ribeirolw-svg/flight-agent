@@ -1,9 +1,13 @@
 {
-  "run_id": "20260112T202109Z",
-  "ts_utc": "2026-01-12T20:21:09Z",
+  "run_id": "20260112T204553Z",
+  "started_utc": "2026-01-12T20:45:53Z",
   "env": "test",
   "max_results": 5,
-  "request_sleep_sec": 2.0,
+  "safe_mode": true,
+  "selected_route_id": "ROMA_GRU_FCO_2A1C_DIRECT",
+  "request_sleep_sec": 2.5,
+  "cooldown_before_start_sec": 12.0,
+  "cooldown_on_429_sec": 25.0,
   "max_429_before_abort": 1,
   "expanded_ranges": {
     "ROMA_GRU_FCO_2A1C_DIRECT": {
@@ -11,18 +15,6 @@
       "max_dep": "2026-09-20",
       "count": 2,
       "step_days": 4
-    },
-    "CWB_CGH_2A1C_DIRECT": {
-      "base": "2026-03-13",
-      "min_dep": "2026-03-13",
-      "max_dep": "2026-05-12",
-      "count": 2
-    },
-    "NVT_GRU_1A": {
-      "base": "2026-03-13",
-      "min_dep": "2026-03-13",
-      "max_dep": "2026-05-12",
-      "count": 2
     }
   },
   "errors_sample": {
@@ -53,5 +45,6 @@
   "offers_sample": {},
   "status_counts": {
     "429": 1
-  }
+  },
+  "finished_utc": "2026-01-12T20:46:38Z"
 }
