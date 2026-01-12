@@ -1,258 +1,157 @@
+#!/usr/bin/env python3
 from __future__ import annotations
 
 import os
-import sys
 import time
-import uuid
-from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 import requests
 
-# -------------------------------------------------------------------
-# PATH FIX: search.py está na raiz, mas utilitario está em /app
-# -------------------------------------------------------------------
-ROOT_DIR = Path(__file__).resolve().parent
-APP_DIR = ROOT_DIR / "app"
-if str(APP_DIR) not in sys.path:
-    sys.path.insert(0, str(APP_DIR))
+# Base URLs do Amadeus
+BASE_TEST = "https://test.api.amadeus.com"
+BASE_PROD = "https://api.amadeus.com"
 
-from utilitario.history_store import HistoryStore  # noqa: E402
+TOKEN_PATH = "/v1/security/oauth2/token"
+OFFERS_PATH = "/v2/shopping/flight-offers"
 
-
-# -------------------------------------------------------------------
-# Amadeus endpoints
-# -------------------------------------------------------------------
-BASE_URL = os.environ.get("AMADEUS_BASE_URL", "https://test.api.amadeus.com").strip()
-TOKEN_URL = f"{BASE_URL}/v1/security/oauth2/token"
-FLIGHT_OFFERS_URL = f"{BASE_URL}/v2/shopping/flight-offers"
+DEFAULT_TIMEOUT = 30
 
 
-def amadeus_get_token(client_id: str, client_secret: str) -> str:
+class AmadeusError(RuntimeError):
+    pass
+
+
+def _base_url(env: str) -> str:
+    env = (env or "").strip().lower()
+    if env in {"prod", "production", "live"}:
+        return BASE_PROD
+    return BASE_TEST
+
+
+def _get_env_required(name: str) -> str:
+    val = os.getenv(name, "").strip()
+    if not val:
+        raise AmadeusError(f"Missing required env var: {name}")
+    return val
+
+
+def _get_token(client_id: str, client_secret: str, base_url: str) -> str:
+    url = f"{base_url}{TOKEN_PATH}"
     resp = requests.post(
-        TOKEN_URL,
+        url,
         data={
             "grant_type": "client_credentials",
             "client_id": client_id,
             "client_secret": client_secret,
         },
-        timeout=30,
+        timeout=DEFAULT_TIMEOUT,
     )
-    resp.raise_for_status()
-    return resp.json()["access_token"]
+
+    if resp.status_code != 200:
+        # tenta extrair json de erro
+        try:
+            payload = resp.json()
+        except Exception:
+            payload = {"raw": resp.text[:500]}
+        raise AmadeusError(f"Token error HTTP {resp.status_code}: {payload}")
+
+    data = resp.json()
+    token = data.get("access_token")
+    if not token:
+        raise AmadeusError(f"Token response missing access_token: {data}")
+    return token
 
 
-def _to_float(x: Any) -> Optional[float]:
-    if x is None:
-        return None
-    try:
-        if isinstance(x, str):
-            return float(x.strip().replace(",", "."))
-        if isinstance(x, (int, float)):
-            return float(x)
-    except Exception:
-        return None
-    return None
-
-
-def _extract_carriers(payload: Any) -> Tuple[List[str], Optional[str]]:
+def _build_params(route: Dict[str, Any], max_results: int) -> Dict[str, Any]:
     """
-    Extrai cia(s) aérea(s) a partir do padrão Amadeus:
-      data[].itineraries[].segments[].carrierCode
-    Retorna:
-      - carriers_unique (ordenado)
-      - carrier_main (a mais frequente)
+    Constrói query params do endpoint flight-offers.
+    Mantém robusto: só inclui o que existir.
     """
-    if not isinstance(payload, dict):
-        return [], None
-    data = payload.get("data")
-    if not isinstance(data, list):
-        return [], None
+    origin = route.get("origin")
+    destination = route.get("destination")
+    departure_date = route.get("departure_date")
+    return_date = route.get("return_date")
 
-    freq: Dict[str, int] = {}
+    if not origin or not destination or not departure_date:
+        raise AmadeusError("Route missing required fields: origin, destination, departure_date")
 
-    for offer in data[:300]:
-        if not isinstance(offer, dict):
-            continue
-        itineraries = offer.get("itineraries")
-        if not isinstance(itineraries, list):
-            continue
-        for it in itineraries:
-            if not isinstance(it, dict):
-                continue
-            segments = it.get("segments")
-            if not isinstance(segments, list):
-                continue
-            for seg in segments:
-                if not isinstance(seg, dict):
-                    continue
-                code = seg.get("carrierCode") or seg.get("carrier") or seg.get("marketingCarrierCode")
-                if isinstance(code, str) and code.strip():
-                    code = code.strip().upper()
-                    freq[code] = freq.get(code, 0) + 1
-
-    if not freq:
-        return [], None
-
-    carriers_unique = sorted(freq.keys())
-    carrier_main = max(freq.items(), key=lambda kv: kv[1])[0]
-    return carriers_unique, carrier_main
-
-
-def _extract_best_price_currency_offerscount(payload: Any) -> Tuple[Optional[float], Optional[str], int]:
-    """
-    Extrai:
-      - best_price (menor grandTotal/total)
-      - currency (se houver)
-      - offers_count
-    Espera payload padrão Amadeus: {"data":[{...offer...}, ...]}
-    """
-    if not isinstance(payload, dict):
-        return None, None, 0
-
-    data = payload.get("data")
-    if not isinstance(data, list):
-        return None, None, 0
-
-    best: Optional[float] = None
-    currency: Optional[str] = None
-    offers_count = len(data)
-
-    for offer in data[:300]:
-        if not isinstance(offer, dict):
-            continue
-
-        price = offer.get("price")
-        if isinstance(price, dict):
-            currency = currency or price.get("currency")
-            gt = price.get("grandTotal") or price.get("total")
-            v = _to_float(gt)
-            if v is not None:
-                best = v if best is None else min(best, v)
-
-    return best, currency, offers_count
-
-
-def amadeus_search_offers(
-    token: str,
-    origin: str,
-    destination: str,
-    departure_date: str,
-    return_date: Optional[str],
-    adults: int = 1,
-    children: int = 0,
-    cabin: str = "ECONOMY",
-    currency: str = "BRL",
-    direct_only: bool = True,
-    max_results: int = 50,
-) -> Dict[str, Any]:
     params: Dict[str, Any] = {
         "originLocationCode": origin,
         "destinationLocationCode": destination,
         "departureDate": departure_date,
-        "adults": adults,
-        "travelClass": cabin,
-        "currencyCode": currency,
-        "nonStop": "true" if direct_only else "false",
-        "max": max_results,
+        "adults": int(route.get("adults") or 1),
+        "max": int(max_results or 10),
     }
-    if children:
-        params["children"] = children
+
+    # opcionais
     if return_date:
         params["returnDate"] = return_date
 
+    children = route.get("children")
+    if children is not None and str(children).strip() != "":
+        params["children"] = int(children)
+
+    cabin = route.get("cabin")
+    if cabin:
+        # Amadeus: ECONOMY, PREMIUM_ECONOMY, BUSINESS, FIRST
+        params["travelClass"] = cabin
+
+    currency = route.get("currency")
+    if currency:
+        params["currencyCode"] = currency
+
+    direct_only = route.get("direct_only")
+    if direct_only is True:
+        params["nonStop"] = "true"
+    elif direct_only is False:
+        params["nonStop"] = "false"
+
+    return params
+
+
+def _request_offers(token: str, base_url: str, params: Dict[str, Any]) -> List[Dict[str, Any]]:
+    url = f"{base_url}{OFFERS_PATH}"
     headers = {"Authorization": f"Bearer {token}"}
-    resp = requests.get(FLIGHT_OFFERS_URL, headers=headers, params=params, timeout=60)
-    resp.raise_for_status()
-    return resp.json()
+
+    resp = requests.get(url, headers=headers, params=params, timeout=DEFAULT_TIMEOUT)
+
+    if resp.status_code != 200:
+        # tenta extrair json de erro do Amadeus
+        try:
+            payload = resp.json()
+        except Exception:
+            payload = {"raw": resp.text[:800]}
+
+        # Alguns erros comuns da sandbox: 429, 400 (params), 401 (token)
+        raise AmadeusError(f"Offers error HTTP {resp.status_code}: {payload}")
+
+    data = resp.json()
+    offers = data.get("data", [])
+    if not isinstance(offers, list):
+        raise AmadeusError(f"Unexpected offers payload shape: {type(offers)}")
+
+    return offers
 
 
-def run_search_and_store(
-    *,
-    store_name: str,
-    client_id: str,
-    client_secret: str,
-    origin: str,
-    destination: str,
-    departure_date: str,
-    return_date: Optional[str],
-    adults: int,
-    children: int,
-    cabin: str,
-    currency: str,
-    direct_only: bool,
-    max_results: int = 50,
-    save_raw: bool = False,
-) -> Dict[str, Any]:
+def search_offers_for_route(route: Dict[str, Any], *, max_results: int, env: str) -> List[Dict[str, Any]]:
     """
-    Grava um payload achatado com campos úteis pro dashboard.
+    Função que o scheduler espera.
+    Retorna lista de flight offers (dicts) conforme payload do Amadeus.
+
+    Erros de rede/auth/params levantam exceção (para o scheduler contabilizar err_calls).
+    Se não houver oferta, retorna [] (OK, não é erro).
     """
-    store = HistoryStore(store_name)
-    run_id = uuid.uuid4().hex[:12]
-    t0 = time.time()
+    base_url = _base_url(env or "test")
 
-    try:
-        token = amadeus_get_token(client_id, client_secret)
-        offers_payload = amadeus_search_offers(
-            token=token,
-            origin=origin,
-            destination=destination,
-            departure_date=departure_date,
-            return_date=return_date,
-            adults=adults,
-            children=children,
-            cabin=cabin,
-            currency=currency,
-            direct_only=direct_only,
-            max_results=max_results,
-        )
+    client_id = _get_env_required("AMADEUS_CLIENT_ID")
+    client_secret = _get_env_required("AMADEUS_CLIENT_SECRET")
 
-        best_price, detected_currency, offers_count = _extract_best_price_currency_offerscount(offers_payload)
-        carriers, carrier_main = _extract_carriers(offers_payload)
+    params = _build_params(route, max_results=max_results)
 
-        payload: Dict[str, Any] = {
-            "run_id": run_id,
-            "origin": origin,
-            "destination": destination,
-            "departure_date": departure_date,
-            "return_date": return_date,
-            "adults": adults,
-            "children": children,
-            "cabin": cabin,
-            "currency": detected_currency or currency,
-            "direct_only": direct_only,
-            "offers_count": offers_count,
-            "best_price": best_price,
-            "carriers": carriers,            # lista ex: ["AD","G3"]
-            "carrier_main": carrier_main,    # ex: "G3"
-            "elapsed_s": round(time.time() - t0, 3),
-            "error": None,
-        }
+    # token por chamada (simples e robusto). Na Etapa 1 a gente faz cache com expiração.
+    token = _get_token(client_id, client_secret, base_url)
 
-        if save_raw:
-            payload["raw"] = offers_payload
+    offers = _request_offers(token, base_url, params)
 
-        store.append("flight_search", payload)
-        return payload
-
-    except Exception as e:
-        payload = {
-            "run_id": run_id,
-            "origin": origin,
-            "destination": destination,
-            "departure_date": departure_date,
-            "return_date": return_date,
-            "adults": adults,
-            "children": children,
-            "cabin": cabin,
-            "currency": currency,
-            "direct_only": direct_only,
-            "offers_count": 0,
-            "best_price": None,
-            "carriers": [],
-            "carrier_main": None,
-            "elapsed_s": round(time.time() - t0, 3),
-            "error": str(e),
-        }
-        store.append("flight_search", payload)
-        return payload
+    # Sem ofertas é OK
+    return offers
