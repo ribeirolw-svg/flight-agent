@@ -34,20 +34,13 @@ ROUTES_FILE = REPO_ROOT / "routes.yaml"
 AMADEUS_ENV = os.getenv("AMADEUS_ENV", "test").strip().lower()
 MAX_RESULTS = int(os.getenv("MAX_RESULTS", "5"))
 
-# throttle between calls
 REQUEST_SLEEP_SEC = float(os.getenv("REQUEST_SLEEP_SEC", "2.5"))
-
-# hard-cooldown to "esfriar" o ambiente test
 COOLDOWN_BEFORE_START_SEC = float(os.getenv("COOLDOWN_BEFORE_START_SEC", "12"))
 COOLDOWN_ON_429_SEC = float(os.getenv("COOLDOWN_ON_429_SEC", "25"))
 
-# abort early when 429 happens (safe mode: 1)
 MAX_429_BEFORE_ABORT = int(os.getenv("MAX_429_BEFORE_ABORT", "1"))
 
-# safe mode: query only one base route per run
 SAFE_MODE = os.getenv("SAFE_MODE", "1").strip() not in ("0", "false", "False", "")
-
-# optionally force a route id on a run (e.g. FORCE_ROUTE_ID=ROMA_GRU_FCO_2A1C_DIRECT)
 FORCE_ROUTE_ID = os.getenv("FORCE_ROUTE_ID", "").strip()
 
 AMADEUS_CLIENT_ID = os.getenv("AMADEUS_CLIENT_ID", "").strip()
@@ -155,7 +148,7 @@ def request_with_retry(
     *,
     headers: Dict[str, str],
     params: Dict[str, Any],
-    retries: int = 2,  # SAFE: low retry; test env fica quente
+    retries: int = 2,
 ) -> requests.Response:
     delay = 1.0
     last_resp: Optional[requests.Response] = None
@@ -460,8 +453,8 @@ def daterange(start: date, end: date) -> List[date]:
 def expand_rome_15d_window(base: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
     rp = base.get("rule_params") or {}
     trip_days = int(rp.get("trip_days", 15))
-    max_pairs = int(rp.get("max_pairs", 2))         # SAFE default: 2
-    step_days = int(rp.get("step_days", 4))         # SAFE default: 4
+    max_pairs = int(rp.get("max_pairs", 2))  # SAFE default
+    step_days = int(rp.get("step_days", 4))  # SAFE default
 
     start_mm_dd = parse_mm_dd(rp.get("start_mm_dd", [9, 1]))
     latest_ret_mm_dd = parse_mm_dd(rp.get("latest_return_mm_dd", [10, 5]))
@@ -491,8 +484,8 @@ def expand_rome_15d_window(base: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], 
 def expand_weekend_window(base: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
     rp = base.get("rule_params") or {}
     start_offset_days = int(rp.get("start_offset_days", 60))  # D+60
-    horizon_days = int(rp.get("horizon_days", 60))            # janela de 60 dias
-    max_pairs = int(rp.get("max_pairs", 6))                   # SAFE default: 6
+    horizon_days = int(rp.get("horizon_days", 60))  # janela 60 dias
+    max_pairs = int(rp.get("max_pairs", 6))  # SAFE default
     max_trip_len_days = int(rp.get("max_trip_len_days", 4))
     depart_dows = [int(x) for x in (rp.get("depart_dows") or [4, 5])]  # Fri/Sat
     return_dows = [int(x) for x in (rp.get("return_dows") or [6, 0])]  # Sun/Mon
@@ -533,7 +526,6 @@ def expand_one_route(base: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], Dict[s
     if rule == "WEEKEND_WINDOW":
         return expand_weekend_window(base)
 
-    # fallback explicit
     if base.get("departure_date") and base.get("return_date"):
         meta = {"min_dep": base["departure_date"], "max_dep": base["departure_date"], "count": 1}
         return [base], meta
@@ -545,17 +537,13 @@ def expand_one_route(base: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], Dict[s
 # Round-robin route picker (SAFE)
 # =============================
 def rr_pick_route_id(routes_base: List[Dict[str, Any]]) -> str:
-    # if forced, honor it (but still validate it exists)
     if FORCE_ROUTE_ID:
         ids = {r["id"] for r in routes_base}
         if FORCE_ROUTE_ID not in ids:
             raise RuntimeError(f"FORCE_ROUTE_ID='{FORCE_ROUTE_ID}' not found in routes.yaml ids")
         return FORCE_ROUTE_ID
 
-    # default fixed order for stability
-    # (keeps Rome in the rotation but not always first)
     order = [r["id"] for r in routes_base]
-
     rr = read_json(RR_FILE, {"idx": 0})
     idx = int(rr.get("idx", 0)) if isinstance(rr, dict) else 0
     if not order:
@@ -585,15 +573,12 @@ def main() -> None:
     if not isinstance(routes_base, list) or not routes_base:
         raise RuntimeError("routes.yaml must contain routes: [ ... ]")
 
-    # ensure each route has an id
     for r in routes_base:
         if "id" not in r or not r["id"]:
-            # deterministic fallback
             r["id"] = f'{r.get("destination","UNK")}_{r.get("origin","UNK")}_{r.get("adults",1)}A{r.get("children",0)}C'
 
     validate_immutable(routes_base)
 
-    # choose which base route to run
     selected_route_id: Optional[str] = None
     if SAFE_MODE:
         selected_route_id = rr_pick_route_id(routes_base)
@@ -602,7 +587,6 @@ def main() -> None:
     else:
         routes_to_run = routes_base[:]
 
-    # expand routes (only selected in SAFE_MODE)
     expanded_routes: List[Dict[str, Any]] = []
     expanded_ranges: Dict[str, Any] = {}
 
@@ -613,7 +597,6 @@ def main() -> None:
 
     print(f"[INFO] Routes expanded: {len(expanded_routes)} | Routes base: {len(routes_base)} | Selected: {len(routes_to_run)}")
 
-    # Prepare debug payload
     debug: Dict[str, Any] = {
         "run_id": rid,
         "started_utc": started,
@@ -631,7 +614,6 @@ def main() -> None:
         "status_counts": {},
     }
 
-    # Counters
     total_calls = 0
     ok_calls = 0
     err_calls = 0
@@ -641,50 +623,52 @@ def main() -> None:
     status_counts: Dict[str, int] = {}
     consecutive_429 = 0
 
-    # Store offers for best/alerts
     offers_by_route: Dict[str, List[OfferMeta]] = {r["id"]: [] for r in routes_base}
 
-    # Get token
     try:
         token = amadeus_get_token(AMADEUS_ENV, AMADEUS_CLIENT_ID, AMADEUS_CLIENT_SECRET)
     except Exception as e:
         err = {"_status": "TOKEN_ERROR", "message": str(e)}
         debug["errors_sample"]["TOKEN"] = err
         write_json(DEBUG_FILE, debug)
-        # write minimal artifacts to avoid "sumir tudo"
+
         finished = utc_now_iso()
-        write_json(STATE_FILE, {
-            "run_id": rid,
-            "started_utc": started,
-            "finished_utc": finished,
-            "duration_sec": 0,
-            "total_calls": 0,
-            "ok_calls": 0,
-            "err_calls": 1,
-            "empty_ok_calls": 0,
-            "success_rate": 0,
-            "offers_saved": 0,
-            "store": "default",
-            "max_results": MAX_RESULTS,
-            "amadeus_env": AMADEUS_ENV,
-            "immutable_required_origins": IMMUTABLE_REQUIRED_ORIGINS,
-            "immutable_required_dests": IMMUTABLE_REQUIRED_DESTS,
-            "expanded_ranges": expanded_ranges,
-            "request_sleep_sec": REQUEST_SLEEP_SEC,
-            "max_429_before_abort": MAX_429_BEFORE_ABORT,
-            "status_counts": {"TOKEN_ERROR": 1},
-        })
-        write_json(BEST_FILE, {"run_id": rid, "updated_utc": finished, "by_route": {}})
-        write_json(ALERTS_FILE, {"run_id": rid, "updated_utc": finished, "alerts": []})
+        write_json(
+            STATE_FILE,
+            {
+                "run_id": rid,
+                "started_utc": started,
+                "finished_utc": finished,
+                "duration_sec": 0,
+                "total_calls": 0,
+                "ok_calls": 0,
+                "err_calls": 1,
+                "empty_ok_calls": 0,
+                "success_rate": 0,
+                "offers_saved": 0,
+                "store": "default",
+                "max_results": MAX_RESULTS,
+                "amadeus_env": AMADEUS_ENV,
+                "immutable_required_origins": IMMUTABLE_REQUIRED_ORIGINS,
+                "immutable_required_dests": IMMUTABLE_REQUIRED_DESTS,
+                "expanded_ranges": expanded_ranges,
+                "request_sleep_sec": REQUEST_SLEEP_SEC,
+                "cooldown_before_start_sec": COOLDOWN_BEFORE_START_SEC,
+                "cooldown_on_429_sec": COOLDOWN_ON_429_SEC,
+                "max_429_before_abort": MAX_429_BEFORE_ABORT,
+                "status_counts": {"TOKEN_ERROR": 1},
+                "safe_mode": SAFE_MODE,
+                "selected_route_id": selected_route_id,
+            },
+        )
+        # não apaga snapshots
         SUMMARY_FILE.write_text("# Flight Agent — Update Summary\n\n- token_error\n", encoding="utf-8")
         raise
 
-    # Cooldown before starting calls (SAFE)
     if AMADEUS_ENV == "test" and COOLDOWN_BEFORE_START_SEC > 0:
         print(f"[INFO] Cooldown before start: sleeping {COOLDOWN_BEFORE_START_SEC:.0f}s (test env)")
         time.sleep(COOLDOWN_BEFORE_START_SEC)
 
-    # Execute calls
     for idx, r in enumerate(expanded_routes, start=1):
         total_calls += 1
 
@@ -745,7 +729,6 @@ def main() -> None:
 
             continue
 
-        # success response
         ok_calls += 1
 
         if not offers:
@@ -794,12 +777,36 @@ def main() -> None:
 
     finished = utc_now_iso()
 
-    # Best & Alerts always (even if empty)
-    best_by_route, alerts = build_best_and_alerts(rid, routes_base, offers_by_route)
-    write_json(BEST_FILE, {"run_id": rid, "updated_utc": finished, "by_route": best_by_route})
-    write_json(ALERTS_FILE, {"run_id": rid, "updated_utc": finished, "alerts": alerts})
+    # -----------------------------
+    # PATCH CRÍTICO:
+    # Se ok_calls == 0, NÃO sobrescreve best/alerts (mantém último snapshot útil)
+    # -----------------------------
+    best_prev = read_json(BEST_FILE, None)
+    alerts_prev = read_json(ALERTS_FILE, None)
 
-    # Duration
+    best_by_route, alerts = build_best_and_alerts(rid, routes_base, offers_by_route)
+
+    if ok_calls == 0:
+        print("[WARN] ok_calls==0 -> preserving previous best_offers.json / alerts.json (rate limit safe)")
+
+        if isinstance(best_prev, dict) and isinstance(best_prev.get("by_route"), dict) and best_prev.get("by_route"):
+            best_prev["last_attempt_run_id"] = rid
+            best_prev["last_attempt_utc"] = finished
+            write_json(BEST_FILE, best_prev)
+        else:
+            write_json(BEST_FILE, {"run_id": rid, "updated_utc": finished, "by_route": best_by_route})
+
+        if isinstance(alerts_prev, dict) and isinstance(alerts_prev.get("alerts"), list):
+            alerts_prev["last_attempt_run_id"] = rid
+            alerts_prev["last_attempt_utc"] = finished
+            write_json(ALERTS_FILE, alerts_prev)
+        else:
+            write_json(ALERTS_FILE, {"run_id": rid, "updated_utc": finished, "alerts": alerts})
+    else:
+        write_json(BEST_FILE, {"run_id": rid, "updated_utc": finished, "by_route": best_by_route})
+        write_json(ALERTS_FILE, {"run_id": rid, "updated_utc": finished, "alerts": alerts})
+
+    # duration
     try:
         dt_start = datetime.fromisoformat(started.replace("Z", "+00:00"))
         dt_end = datetime.fromisoformat(finished.replace("Z", "+00:00"))
@@ -809,7 +816,6 @@ def main() -> None:
 
     success_rate = (ok_calls / total_calls) if total_calls else 0.0
 
-    # State
     state_payload = {
         "run_id": rid,
         "started_utc": started,
@@ -837,14 +843,15 @@ def main() -> None:
     }
     write_json(STATE_FILE, state_payload)
 
-    # Debug file
     debug["finished_utc"] = finished
     debug["status_counts"] = status_counts
     write_json(DEBUG_FILE, debug)
 
-    # Summary
+    # summary
     sample_lines: List[str] = []
-    for _, bo in best_by_route.items():
+    for _, bo in (best_by_route or {}).items():
+        if not isinstance(bo, dict):
+            continue
         if bo.get("price_total") is None:
             continue
         sample_lines.append(
@@ -870,6 +877,8 @@ def main() -> None:
     summary_md.append(f"- safe_mode: `{SAFE_MODE}`")
     summary_md.append(f"- selected_route_id: `{selected_route_id}`")
     summary_md.append(f"- status_counts: `{status_counts}`")
+    if ok_calls == 0 and status_counts.get("429"):
+        summary_md.append(f"- note: `RATE_LIMITED (preserved last best_offers/alerts)`")
     summary_md.append("\n## Sample best offers (preview)")
     if sample_lines:
         summary_md.extend(sample_lines)
