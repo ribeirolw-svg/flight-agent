@@ -1,342 +1,353 @@
+# app.py
 from __future__ import annotations
 
 import json
-import sys
-from datetime import datetime, timedelta, timezone
+from dataclasses import dataclass
+from datetime import date, datetime, timedelta
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
 import streamlit as st
 
-# --- paths
-APP_DIR = Path(__file__).resolve().parent
-ROOT_DIR = APP_DIR.parent
-if str(APP_DIR) not in sys.path:
-    sys.path.insert(0, str(APP_DIR))
-if str(ROOT_DIR) not in sys.path:
-    sys.path.insert(0, str(ROOT_DIR))
-
-# opcional (mantém compatibilidade com seu projeto, mesmo que não use)
+# Opcional: ler YAML (routes.yaml)
 try:
-    from utilitario.history_store import HistoryStore  # noqa: F401
+    import yaml  # type: ignore
 except Exception:
-    HistoryStore = None  # type: ignore
+    yaml = None
 
-st.set_page_config(page_title="Flight Agent", layout="wide")
-st.title("✈️ Flight Agent — Histórico & Insights")
-
-DATA_DIR = Path("data")
-STATE_PATH = DATA_DIR / "state.json"
-HISTORY_PATH = DATA_DIR / "history.jsonl"
-ALERTS_PATH = DATA_DIR / "alerts.json"
-
-# -----------------------------
-# Timezone helpers
-# -----------------------------
 try:
     from zoneinfo import ZoneInfo
 except Exception:
-    ZoneInfo = None
-
-TZ_SP = ZoneInfo("America/Sao_Paulo") if ZoneInfo else timezone(timedelta(hours=-3))
-
-# Seu cron: 09:15 UTC = 06:15 BRT
-SCHEDULE_HOUR_LOCAL = 6
-SCHEDULE_MIN_LOCAL = 15
-CRON_EXPECTED = "15 9 * * *"
+    ZoneInfo = None  # py<3.9 (não deve ser o caso)
 
 
-def parse_iso_any(s: Any) -> Optional[datetime]:
-    if not s:
-        return None
-    try:
-        s = str(s).strip()
-        if not s:
-            return None
-        s = s.replace("Z", "+00:00")
-        dt = datetime.fromisoformat(s)
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
-        return dt.astimezone(timezone.utc)
-    except Exception:
-        return None
+DATA_DIR = Path("data")
+ROUTES_FILE = Path("routes.yaml")
+TZ_NAME = "America/Sao_Paulo"
 
 
-def next_runs_local(n: int = 7) -> List[datetime]:
-    now_local = datetime.now(TZ_SP)
-    candidate = now_local.replace(hour=SCHEDULE_HOUR_LOCAL, minute=SCHEDULE_MIN_LOCAL, second=0, microsecond=0)
-    if candidate <= now_local:
-        candidate += timedelta(days=1)
-    runs = []
-    for _ in range(n):
-        runs.append(candidate)
-        candidate += timedelta(days=1)
-    return runs
-
-
-# -----------------------------
-# Load persisted files
-# -----------------------------
-def read_json(path: Path) -> Dict[str, Any]:
+# -------------------------
+# Utilidades básicas
+# -------------------------
+def load_json(path: Path, default: Any) -> Any:
     if not path.exists():
-        return {}
+        return default
     try:
         return json.loads(path.read_text(encoding="utf-8"))
     except Exception:
-        return {}
+        return default
 
 
-def read_history_jsonl(path: Path, limit_lines: int = 20000) -> List[Dict[str, Any]]:
-    if not path.exists():
-        return []
+def fmt_money(v: Any, currency: str = "BRL") -> str:
     try:
-        lines = path.read_text(encoding="utf-8").splitlines()
-        if len(lines) > limit_lines:
-            lines = lines[-limit_lines:]
-        rows: List[Dict[str, Any]] = []
-        for ln in lines:
-            ln = ln.strip()
-            if not ln:
-                continue
-            try:
-                rows.append(json.loads(ln))
-            except Exception:
-                continue
-        return rows
+        x = float(v)
+        return f"{currency} {x:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
     except Exception:
-        return []
+        return str(v)
 
 
-def normalize_df(rows: List[Dict[str, Any]]) -> pd.DataFrame:
-    if not rows:
-        return pd.DataFrame()
-    df = pd.DataFrame(rows)
-
-    expected = [
-        "ts_utc", "type", "source", "store_name", "route_name",
-        "run_id", "origin", "destination",
-        "departure_date", "return_date",
-        "adults", "children", "cabin",
-        "currency", "direct_only",
-        "offers_count", "best_price",
-        "carriers", "carrier_main",
-        "elapsed_s", "error",
-    ]
-    for c in expected:
-        if c not in df.columns:
-            df[c] = None
-
-    df["ts_utc_dt"] = pd.to_datetime(df["ts_utc"], errors="coerce", utc=True)
-    df["offers_count"] = pd.to_numeric(df["offers_count"], errors="coerce")
-    df["best_price"] = pd.to_numeric(df["best_price"], errors="coerce")
-    df["elapsed_s"] = pd.to_numeric(df["elapsed_s"], errors="coerce")
-    df["adults"] = pd.to_numeric(df["adults"], errors="coerce")
-    df["children"] = pd.to_numeric(df["children"], errors="coerce")
-
-    df["has_error"] = df["error"].apply(lambda x: bool(x) and str(x).strip().lower() not in ["none", "null", ""])
-    df["route"] = df.apply(lambda r: f"{(r.get('origin') or '-')} → {(r.get('destination') or '-')}", axis=1)
-
-    df = df.sort_values("ts_utc_dt", ascending=False)
-    return df
+def local_today() -> date:
+    if ZoneInfo is None:
+        return datetime.utcnow().date()
+    return datetime.now(ZoneInfo(TZ_NAME)).date()
 
 
-# -----------------------------
-# Sidebar filters
-# -----------------------------
-st.sidebar.header("Filtros")
+def dow_name(d: date) -> str:
+    # 0=Mon..6=Sun
+    names = ["Seg", "Ter", "Qua", "Qui", "Sex", "Sáb", "Dom"]
+    return names[d.weekday()]
 
-days = st.sidebar.slider("Janela (dias)", 1, 365, 30)
 
-route_name = st.sidebar.text_input("Route name (ex: Roma, Curitiba)", value="").strip()
-origin = st.sidebar.text_input("Origin (ex: CGH)", value="").strip().upper()
-destination = st.sidebar.text_input("Destination (ex: CWB, NVT, FCO)", value="").strip().upper()
-carrier = st.sidebar.text_input("CIA aérea (ex: G3)", value="").strip().upper()
+def route_key(r: Dict[str, Any]) -> str:
+    return f'{r.get("origin","")}-{r.get("destination","")}:{r.get("departure_date","")}:{r.get("return_date","")}:{r.get("cabin","")}'
 
-adults_filter = st.sidebar.selectbox("Adultos", ["(todos)", "1", "2", "3", "4", "5", "6", "7", "8", "9"], 0)
-children_filter = st.sidebar.selectbox("Crianças", ["(todos)", "0", "1", "2", "3", "4", "5"], 0)
 
-only_errors = st.sidebar.checkbox("Somente com erro", value=False)
-hide_errors = st.sidebar.checkbox("Ocultar com erro", value=False)
+# -------------------------
+# Regras de Ouro (expansão)
+# -------------------------
+def generate_rome_pairs(
+    year: int,
+    start_mm_dd: Tuple[int, int] = (9, 1),
+    latest_return_mm_dd: Tuple[int, int] = (10, 5),
+    trip_days: int = 15,
+) -> List[Tuple[date, date]]:
+    """
+    Roma:
+      - ida a partir de 01/09 (inclusive)
+      - sempre 15 dias
+      - retorno até 05/10 (inclusive)
+    """
+    start = date(year, start_mm_dd[0], start_mm_dd[1])
+    latest_return = date(year, latest_return_mm_dd[0], latest_return_mm_dd[1])
 
-# -----------------------------
-# Execuções (state.json)
-# -----------------------------
-st.subheader("🗓️ Execuções do Scheduler")
+    latest_depart = latest_return - timedelta(days=trip_days)
+    pairs: List[Tuple[date, date]] = []
 
-state = read_json(STATE_PATH)
-last_run_utc = parse_iso_any(state.get("last_run_utc"))
-last_success_utc = parse_iso_any(state.get("last_success_utc"))
-last_status = state.get("last_status") or "-"
-last_error = state.get("last_error") or ""
-last_summary = state.get("last_summary") or ""
+    d = start
+    while d <= latest_depart:
+        r = d + timedelta(days=trip_days)
+        if r <= latest_return:
+            pairs.append((d, r))
+        d += timedelta(days=1)
+    return pairs
 
-c1, c2, c3, c4 = st.columns(4)
-c1.metric("Status", str(last_status))
-c2.metric("Último run (BRT)", last_run_utc.astimezone(TZ_SP).strftime("%Y-%m-%d %H:%M") if last_run_utc else "-")
-c3.metric("Último sucesso (BRT)", last_success_utc.astimezone(TZ_SP).strftime("%Y-%m-%d %H:%M") if last_success_utc else "-")
-c4.metric("Cron (UTC)", CRON_EXPECTED)
 
-if last_summary:
-    st.caption(f"Resumo: {last_summary}")
-if last_error.strip():
-    st.error(f"Último erro: {last_error}")
+def generate_weekend_30d_pairs(
+    base: date,
+    horizon_days: int = 30,
+    depart_dows: Tuple[int, ...] = (4, 5),  # Sex(4) ou Sáb(5)
+    return_dows: Tuple[int, ...] = (6, 0),  # Dom(6) ou Seg(0)
+    max_trip_len_days: int = 4,
+) -> List[Tuple[date, date]]:
+    """
+    Curitiba / Navegantes:
+      - olhar sempre 30 dias pra frente
+      - ida na sexta ou sábado
+      - volta no domingo ou segunda
+    """
+    end = base + timedelta(days=horizon_days)
+    pairs: List[Tuple[date, date]] = []
 
-runs = next_runs_local(7)
-st.dataframe(
-    pd.DataFrame(
-        [{"Execução (BRT)": r.strftime("%Y-%m-%d %H:%M"), "Execução (UTC)": r.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M")} for r in runs]
-    ),
-    use_container_width=True,
-)
+    d = base
+    while d <= end:
+        if d.weekday() in depart_dows:
+            # possíveis retornos nos próximos dias (1..max_trip_len_days)
+            for k in range(1, max_trip_len_days + 1):
+                r = d + timedelta(days=k)
+                if r <= end and r.weekday() in return_dows:
+                    pairs.append((d, r))
+        d += timedelta(days=1)
 
-# -----------------------------
-# Alertas (alerts.json)
-# -----------------------------
-st.divider()
-st.subheader("🚨 Alertas")
+    # remover duplicatas e ordenar
+    pairs = sorted(list(set(pairs)))
+    return pairs
 
-if not ALERTS_PATH.exists():
-    st.info("Ainda não existe data/alerts.json. Rode o workflow 1x (com scheduler+alerts) para gerar automaticamente.")
-else:
-    alerts_obj = read_json(ALERTS_PATH)
-    generated_utc = alerts_obj.get("generated_utc")
-    triggered_count = alerts_obj.get("triggered_count", 0)
-    alerts_list = alerts_obj.get("alerts", [])
 
-    gen_dt = parse_iso_any(generated_utc)
-    st.caption(
-        f"Gerado em: {gen_dt.astimezone(TZ_SP).strftime('%Y-%m-%d %H:%M')} (BRT)"
-        if gen_dt else f"Gerado em (UTC): {generated_utc or '-'}"
-    )
+def expand_routes_from_rules(routes_yaml: Dict[str, Any], today: date) -> List[Dict[str, Any]]:
+    """
+    Entende duas formas:
+    1) Rotas "fixas": tem departure_date/return_date
+    2) Rotas com rule: "ROME_15D_WINDOW" ou "WEEKEND_30D"
+    """
+    routes = routes_yaml.get("routes") or []
+    expanded: List[Dict[str, Any]] = []
 
-    if triggered_count:
-        st.error(f"⚠️ {triggered_count} alerta(s) disparado(s)!")
-    else:
-        st.success("✅ Nenhum alerta disparado.")
+    for r in routes:
+        rule = (r.get("rule") or "").strip().upper()
 
-    if isinstance(alerts_list, list) and alerts_list:
-        df_alerts = pd.DataFrame(alerts_list)
+        # Se tem datas fixas, mantém como 1 rota
+        if r.get("departure_date") and r.get("return_date") and not rule:
+            expanded.append(r)
+            continue
 
-        if "triggered" in df_alerts.columns:
-            triggered = df_alerts[df_alerts["triggered"] == True].copy()
-            all_ = df_alerts.copy()
+        if rule == "ROME_15D_WINDOW":
+            # por padrão usa o ano do "today"
+            pairs = generate_rome_pairs(
+                year=today.year,
+                trip_days=int((r.get("rule_params") or {}).get("trip_days", 15)),
+            )
+            # se hoje já passou de 05/10 do ano corrente, mostra para o ano seguinte
+            # (isso evita "vazio" fora da janela)
+            if not pairs:
+                pairs = generate_rome_pairs(year=today.year + 1)
+
+            for dep, ret in pairs:
+                rr = dict(r)
+                rr["departure_date"] = dep.isoformat()
+                rr["return_date"] = ret.isoformat()
+                expanded.append(rr)
+
+        elif rule == "WEEKEND_30D":
+            params = r.get("rule_params") or {}
+            horizon = int(params.get("horizon_days", 30))
+            pairs = generate_weekend_30d_pairs(today, horizon_days=horizon)
+
+            for dep, ret in pairs:
+                rr = dict(r)
+                rr["departure_date"] = dep.isoformat()
+                rr["return_date"] = ret.isoformat()
+                expanded.append(rr)
+
         else:
-            triggered = pd.DataFrame()
-            all_ = df_alerts
+            # fallback: se não tem datas e não tem rule reconhecida, ignora com aviso no app
+            rr = dict(r)
+            rr["_invalid"] = True
+            expanded.append(rr)
 
-        if not triggered.empty:
-            st.write("**Disparados**")
-            cols = [c for c in ["name","origin","destination","best_price","threshold","currency","carrier_main","departure_date","return_date","ts_utc","route_name"] if c in triggered.columns]
-            if "best_price" in triggered.columns:
-                triggered = triggered.sort_values("best_price")
-            st.dataframe(triggered[cols], use_container_width=True)
+    return expanded
 
-        st.write("**Monitorados (todos)**")
-        cols2 = [c for c in ["name","triggered","origin","destinations","destination","threshold","currency"] if c in all_.columns]
-        st.dataframe(all_[cols2], use_container_width=True)
+
+# -------------------------
+# UI
+# -------------------------
+st.set_page_config(page_title="Flight Agent Dashboard", layout="wide")
+
+st.title("✈️ Flight Agent — Dashboard")
+
+colA, colB, colC = st.columns(3)
+with colA:
+    st.metric("Hoje (local)", str(local_today()))
+with colB:
+    st.caption("Pasta de dados")
+    st.code(str(DATA_DIR), language="text")
+with colC:
+    st.caption("Arquivos esperados")
+    st.code("data/best_offers.json\n"
+            "data/alerts.json\n"
+            "data/summary.md\n"
+            "data/state.json\n"
+            "data/history.jsonl", language="text")
+
+best = load_json(DATA_DIR / "best_offers.json", {"by_route": {}})
+alerts = load_json(DATA_DIR / "alerts.json", {"alerts": []})
+summary_md = (DATA_DIR / "summary.md").read_text(encoding="utf-8") if (DATA_DIR / "summary.md").exists() else None
+state = load_json(DATA_DIR / "state.json", {})
+
+# ---- Top: status do último run
+st.subheader("🧾 Último run")
+c1, c2, c3, c4 = st.columns(4)
+with c1:
+    st.metric("run_id", str(state.get("run_id") or best.get("run_id") or alerts.get("run_id") or "—"))
+with c2:
+    st.metric("finished_utc", str(state.get("finished_utc") or best.get("updated_utc") or alerts.get("updated_utc") or "—"))
+with c3:
+    st.metric("offers_saved", str(state.get("offers_saved") or "—"))
+with c4:
+    st.metric("amadeus_env", str(state.get("amadeus_env") or "—"))
+
+if summary_md:
+    with st.expander("Ver summary.md"):
+        st.markdown(summary_md)
+
+st.divider()
+
+# ---- Best Offer
+st.subheader("🏆 Best Offer (sempre aparece)")
+rows_best: List[Dict[str, Any]] = []
+by_route = best.get("by_route") or {}
+
+for rk, b in by_route.items():
+    # b pode ser: {"origin":..,"destination":..,"price_total":..} ou outro shape
+    if not isinstance(b, dict):
+        continue
+    price = b.get("price_total")
+    if price is None:
+        continue
+    rows_best.append({
+        "Rota": f'{b.get("origin","?")}→{b.get("destination","?")}',
+        "Ida": b.get("departure_date"),
+        "Volta": b.get("return_date"),
+        "Cia": b.get("carrier"),
+        "Stops": b.get("stops"),
+        "Preço (Total)": float(price),
+    })
+
+if rows_best:
+    dfb = pd.DataFrame(rows_best).sort_values("Preço (Total)", ascending=True)
+    dfb["Preço (Total)"] = dfb["Preço (Total)"].apply(lambda x: fmt_money(x, "BRL"))
+    st.dataframe(dfb, use_container_width=True, hide_index=True)
+else:
+    st.info("Ainda não há best_offers.json com conteúdo (ou não há offers válidas).")
+
+st.divider()
+
+# ---- Alerts
+st.subheader("🚨 Alertas de preço")
+als = alerts.get("alerts") or []
+if not als:
+    st.success("Nenhuma oferta no trigger identificada ✅")
+else:
+    dfa = pd.DataFrame(als)
+
+    # Ordenação inteligente
+    if "delta_pct" in dfa.columns:
+        dfa = dfa.sort_values("delta_pct", ascending=False)
+
+    # Formatar números
+    if "current_price" in dfa.columns:
+        dfa["current_price"] = dfa["current_price"].apply(lambda x: fmt_money(x, "BRL"))
+    if "prev_best_price" in dfa.columns:
+        dfa["prev_best_price"] = dfa["prev_best_price"].apply(lambda x: fmt_money(x, "BRL"))
+    if "target_price" in dfa.columns:
+        dfa["target_price"] = dfa["target_price"].apply(lambda x: fmt_money(x, "BRL"))
+    if "delta_pct" in dfa.columns:
+        dfa["delta_pct"] = dfa["delta_pct"].apply(lambda x: f"{float(x):.1f}%")
+
+    st.dataframe(dfa, use_container_width=True, hide_index=True)
+
+st.divider()
+
+# ---- Planejador / Regras de Ouro
+st.subheader("📅 Planejador de Rotas (regras de ouro)")
+
+if yaml is None:
+    st.warning("PyYAML não está instalado no ambiente do Streamlit. Instale para o planejador ler routes.yaml.")
+else:
+    if not ROUTES_FILE.exists():
+        st.warning("routes.yaml não encontrado na raiz do projeto. (O scheduler também depende dele.)")
     else:
-        st.info("alerts.json existe, mas está vazio (sem alerts configurados ou sem hits).")
+        cfg = yaml.safe_load(ROUTES_FILE.read_text(encoding="utf-8")) or {}
+        today = local_today()
 
-# -----------------------------
-# Histórico (history.jsonl)
-# -----------------------------
-st.divider()
-st.subheader("📌 Histórico persistido (data/history.jsonl)")
+        expanded = expand_routes_from_rules(cfg, today)
 
-rows = read_history_jsonl(HISTORY_PATH)
-df = normalize_df(rows)
+        # Separar inválidas
+        invalid = [r for r in expanded if r.get("_invalid")]
+        ok = [r for r in expanded if not r.get("_invalid")]
 
-# janela
-if not df.empty and df["ts_utc_dt"].notna().any():
-    cutoff = datetime.now(timezone.utc) - timedelta(days=days)
-    df = df[df["ts_utc_dt"] >= cutoff]
+        # Mostrar rotas “como o scheduler deveria enxergar” depois de expandir regra
+        rows_plan: List[Dict[str, Any]] = []
+        for r in ok:
+            dep = r.get("departure_date")
+            ret = r.get("return_date")
+            if not dep or not ret:
+                continue
+            dep_d = date.fromisoformat(dep)
+            ret_d = date.fromisoformat(ret)
 
-# filtros
-if not df.empty:
-    if route_name:
-        df = df[df["route_name"].astype(str).str.contains(route_name, case=False, na=False)]
-    if origin:
-        df = df[df["origin"].astype(str).str.upper() == origin]
-    if destination:
-        df = df[df["destination"].astype(str).str.upper() == destination]
-    if carrier:
-        df = df[df["carrier_main"].astype(str).str.upper() == carrier]
+            rows_plan.append({
+                "Origem": r.get("origin"),
+                "Destino": r.get("destination"),
+                "Ida": dep,
+                "DOW Ida": dow_name(dep_d),
+                "Volta": ret,
+                "DOW Volta": dow_name(ret_d),
+                "Rule": (r.get("rule") or "").strip() or "FIXA",
+            })
 
-    if adults_filter != "(todos)":
-        df = df[df["adults"].fillna(-1).astype(int) == int(adults_filter)]
-    if children_filter != "(todos)":
-        df = df[df["children"].fillna(-1).astype(int) == int(children_filter)]
+        dfp = pd.DataFrame(rows_plan)
 
-    if only_errors:
-        df = df[df["has_error"] == True]
-    if hide_errors:
-        df = df[df["has_error"] == False]
+        # Filtros
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            dest_filter = st.selectbox(
+                "Filtrar destino",
+                options=["(todos)"] + sorted([d for d in dfp["Destino"].unique()]) if not dfp.empty else ["(todos)"],
+            )
+        with c2:
+            max_rows = st.slider("Máximo de linhas", 10, 300, 60, step=10)
+        with c3:
+            show_only_next = st.checkbox("Mostrar só as próximas 20 por destino", value=True)
 
-k1, k2, k3, k4, k5 = st.columns(5)
-total_events = int(df.shape[0]) if not df.empty else 0
-total_errors = int(df["has_error"].sum()) if not df.empty else 0
-last_event = df["ts_utc_dt"].iloc[0] if (not df.empty and df["ts_utc_dt"].notna().any()) else None
-offers_sum = int(df["offers_count"].fillna(0).sum()) if not df.empty else 0
-best_seen = float(df["best_price"].min()) if (not df.empty and df["best_price"].notna().any()) else None
+        if not dfp.empty:
+            if dest_filter != "(todos)":
+                dfp = dfp[dfp["Destino"] == dest_filter]
 
-k1.metric("Eventos", f"{total_events}")
-k2.metric("Erros", f"{total_errors}")
-k3.metric("Último evento (BRT)", last_event.astimezone(TZ_SP).strftime("%Y-%m-%d %H:%M") if last_event else "-")
-k4.metric("Ofertas (soma)", f"{offers_sum}")
-k5.metric("Menor preço", "-" if best_seen is None else f"{best_seen:,.2f}")
+            # ordenar por destino e ida
+            dfp = dfp.sort_values(["Destino", "Ida"], ascending=True)
 
-st.subheader("💸 Melhor preço por rota / CIA")
-if df.empty or df["best_price"].dropna().empty:
-    st.info("Sem preços no período/filtros.")
-else:
-    best = (
-        df.dropna(subset=["best_price"])
-          .groupby(["route_name", "origin", "destination", "carrier_main"], as_index=False)
-          .agg(best_price=("best_price", "min"), samples=("best_price", "count"))
-          .sort_values("best_price")
-    )
-    st.dataframe(best, use_container_width=True)
+            if show_only_next:
+                dfp = dfp.groupby("Destino", as_index=False).head(20)
 
-st.subheader("🧾 Eventos recentes")
-if df.empty:
-    st.info("Sem eventos. Verifique se history.jsonl está sendo commitado.")
-else:
-    cols = [
-        "ts_utc",
-        "route_name",
-        "origin",
-        "destination",
-        "departure_date",
-        "return_date",
-        "adults",
-        "children",
-        "carrier_main",
-        "offers_count",
-        "best_price",
-        "elapsed_s",
-        "error",
-    ]
-    cols = [c for c in cols if c in df.columns]
-    st.dataframe(df[cols].head(2000), use_container_width=True)
+            st.dataframe(dfp.head(max_rows), use_container_width=True, hide_index=True)
+        else:
+            st.info("Nenhuma rota planejada gerada a partir do routes.yaml.")
 
-    st.download_button(
-        "⬇️ Baixar CSV filtrado",
-        data=df[cols].to_csv(index=False),
-        file_name=f"flight_history_{days}d.csv",
-        mime="text/csv",
-    )
+        if invalid:
+            with st.expander("Rotas inválidas (sem datas e sem rule reconhecida)"):
+                st.json(invalid)
 
-# -----------------------------
-# Diagnóstico
-# -----------------------------
-st.divider()
-st.subheader("🔎 Diagnóstico (arquivos persistidos)")
-st.write("state.json existe?", STATE_PATH.exists(), str(STATE_PATH))
-st.write("history.jsonl existe?", HISTORY_PATH.exists(), str(HISTORY_PATH))
-st.write("alerts.json existe?", ALERTS_PATH.exists(), str(ALERTS_PATH))
-if HISTORY_PATH.exists():
-    try:
-        st.write("history.jsonl tamanho (bytes):", HISTORY_PATH.stat().st_size)
-    except Exception:
-        pass
+st.caption(
+    "Dica: se seu scheduler ainda está cravando datas, mude o routes.yaml para usar 'rule' em vez de departure_date/return_date fixos."
+)
