@@ -1,29 +1,48 @@
 routes:
+  # ROMA — ida a partir 01/09, 15 dias, retorno até 05/10
   - origin: "GRU"
     destination: "FCO"
-    departure_date: "2026-01-30"
-    return_date: "2026-02-02"
     adults: 2
     children: 1
     cabin: "ECONOMY"
     currency: "BRL"
     direct_only: true
+    rule: "ROME_15D_WINDOW"
+    rule_params:
+      trip_days: 15
     watch:
       target_price_total: 12000
       alert_drop_pct: 8
       max_stops: 0
       prefer_airlines: ["AZ"]
 
+  # CURITIBA — 30d pra frente, ida Sex/Sáb, volta Dom/Seg
   - origin: "CGH"
     destination: "CWB"
-    departure_date: "2026-01-30"
-    return_date: "2026-02-02"
     adults: 2
     children: 1
     cabin: "ECONOMY"
     currency: "BRL"
     direct_only: true
+    rule: "WEEKEND_30D"
+    rule_params:
+      horizon_days: 30
     watch:
       target_price_total: 1800
       alert_drop_pct: 10
       max_stops: 0
+
+  # NAVEGANTES — mesma regra Curitiba
+  - origin: "GRU"
+    destination: "NVT"
+    adults: 2
+    children: 1
+    cabin: "ECONOMY"
+    currency: "BRL"
+    direct_only: false
+    rule: "WEEKEND_30D"
+    rule_params:
+      horizon_days: 30
+    watch:
+      target_price_total: 2200
+      alert_drop_pct: 10
