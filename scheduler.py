@@ -160,7 +160,7 @@ def expand_routes(routes_base: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     for r in routes_base:
         rule = (r.get("rule") or "").strip().upper()
 
-        # ✅ Se tiver departure/return preenchidos, vira rota fixa (guardrail)
+        # rota fixa sem rule
         if r.get("departure_date") and r.get("return_date") and not rule:
             expanded.append(r)
             continue
@@ -199,7 +199,6 @@ def expand_routes(routes_base: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
             return_dows = tuple(params.get("return_dows", [6, 0]))
             max_trip_len_days = int(params.get("max_trip_len_days", 4))
 
-            # ✅ ESTE é o ponto: começa em D + offset
             base = today + timedelta(days=start_offset_days)
 
             pairs = generate_weekend_pairs(
@@ -219,12 +218,11 @@ def expand_routes(routes_base: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         else:
             continue
 
-    # ✅ LOG DE SANITY: mostra o range de datas por route_id
+    # sanity log (ajuda você a ver D+60 no Actions)
     by_id: Dict[str, List[str]] = {}
     for rr in expanded:
         rid = str(rr.get("id") or route_key(rr))
         by_id.setdefault(rid, []).append(rr["departure_date"])
-
     for rid, deps in by_id.items():
         deps_sorted = sorted(deps)
         print(f"[INFO] Expanded range for {rid}: {deps_sorted[0]} .. {deps_sorted[-1]} ({len(deps_sorted)} departures)")
@@ -302,39 +300,109 @@ def amadeus_search_offers(
 
 
 # =============================
-# Offer normalization (ROBUSTO)
+# Offer normalization (FIX)
 # =============================
-def extract_price_total(offer: Dict[str, Any]) -> Optional[float]:
+def _walk_find_price(obj: Any) -> Optional[float]:
     """
-    Extrai preço total de vários formatos possíveis.
+    Fallback agressivo: percorre dict/list procurando chaves típicas de preço.
+    Para não explodir CPU, limita profundidade de forma indireta pelo tamanho típico dos objetos.
     """
-    # campos diretos
-    for k in ("price_total", "total_price", "total", "price"):
-        if k in offer and offer.get(k) is not None and not isinstance(offer.get(k), dict):
-            v = safe_float(offer.get(k))
+    if obj is None:
+        return None
+
+    if isinstance(obj, (int, float)):
+        return float(obj)
+
+    if isinstance(obj, str):
+        v = safe_float(obj)
+        return v
+
+    if isinstance(obj, dict):
+        # tentativas diretas
+        for k in ("grandTotal", "total", "totalPrice", "price_total", "total_price"):
+            if k in obj and obj.get(k) is not None:
+                v = safe_float(obj.get(k))
+                if v is not None:
+                    return v
+
+        # busca em subestruturas
+        for v0 in obj.values():
+            v = _walk_find_price(v0)
             if v is not None:
                 return v
 
-    # amadeus raw: offer["price"]["grandTotal"] ou ["total"]
+    if isinstance(obj, list):
+        for it in obj:
+            v = _walk_find_price(it)
+            if v is not None:
+                return v
+
+    return None
+
+
+def extract_price_total(offer: Dict[str, Any]) -> Optional[float]:
+    # 1) padrão Amadeus
     p = offer.get("price")
     if isinstance(p, dict):
         v = safe_float(p.get("grandTotal")) or safe_float(p.get("total"))
         if v is not None:
             return v
 
-    # alguns payloads podem ter "travelerPricings" com total (fallback fraco)
+    # 2) alguns formatos alternativos (se existirem)
+    for k in ("price_total", "total_price", "total"):
+        if k in offer and offer.get(k) is not None:
+            v = safe_float(offer.get(k))
+            if v is not None:
+                return v
+
+    # 3) travelerPricings (total por viajante) — às vezes vem só aqui
     tp = offer.get("travelerPricings")
     if isinstance(tp, list) and tp:
-        # tenta pegar o total do primeiro traveler (muitos retornam igual para todos)
-        first = tp[0] if isinstance(tp[0], dict) else None
-        if isinstance(first, dict):
-            price = first.get("price")
-            if isinstance(price, dict):
-                v = safe_float(price.get("total")) or safe_float(price.get("grandTotal"))
+        # tenta pegar um total global, senão soma
+        totals = []
+        for t in tp:
+            if not isinstance(t, dict):
+                continue
+            pp = t.get("price")
+            if isinstance(pp, dict):
+                v = safe_float(pp.get("total")) or safe_float(pp.get("grandTotal"))
                 if v is not None:
-                    return v
+                    totals.append(v)
+        if totals:
+            # se vierem iguais (muitos payloads), pega o maior; se vierem individuais, soma
+            if len(set(round(x, 2) for x in totals)) == 1:
+                return totals[0]
+            return sum(totals)
 
-    return None
+    # 4) fallback agressivo
+    return _walk_find_price(offer)
+
+
+def compute_stops(offer: Dict[str, Any]) -> int:
+    # tenta direto
+    s = offer.get("stops") or offer.get("number_of_stops")
+    if s is not None:
+        try:
+            return int(s)
+        except Exception:
+            pass
+
+    # calcula por itineraries/segments
+    try:
+        stops_calc = 0
+        its = offer.get("itineraries", []) or []
+        if isinstance(its, list):
+            for it in its:
+                if not isinstance(it, dict):
+                    continue
+                segs = it.get("segments", []) or []
+                if isinstance(segs, list) and segs:
+                    stops_calc = max(stops_calc, max(0, len(segs) - 1))
+            return int(stops_calc)
+    except Exception:
+        pass
+
+    return 99  # desconhecido
 
 
 def normalize_offer(offer: Dict[str, Any]) -> Dict[str, Any]:
@@ -350,20 +418,7 @@ def normalize_offer(offer: Dict[str, Any]) -> Dict[str, Any]:
         else:
             carrier = "?"
 
-    stops = offer.get("stops") or offer.get("number_of_stops")
-    if stops is None:
-        try:
-            stops_calc = 0
-            for it in offer.get("itineraries", []) or []:
-                segs = it.get("segments", []) or []
-                stops_calc = max(stops_calc, max(0, len(segs) - 1))
-            stops = stops_calc
-        except Exception:
-            stops = 99
-    try:
-        stops = int(stops)
-    except Exception:
-        stops = 99
+    stops = compute_stops(offer)
 
     return {"price_total": price, "carrier": carrier, "stops": stops, "raw": offer}
 
@@ -399,24 +454,42 @@ def save_alerts(run_id: str, alerts: List[Dict[str, Any]]) -> None:
     ALERTS_FILE.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
-def pick_best_offer(candidates: List[Dict[str, Any]], watch: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+def pick_best_offer(candidates: List[Dict[str, Any]], watch: Dict[str, Any], rk: str) -> Optional[Dict[str, Any]]:
     normed: List[Dict[str, Any]] = []
+    debug_no_price = 0
+    debug_total = 0
+
     for c in candidates:
         offer = c.get("offer")
         if not isinstance(offer, dict) or "_error" in offer:
             continue
+
+        debug_total += 1
         n = normalize_offer(offer)
         if n["price_total"] is None:
+            debug_no_price += 1
             continue
+
         n["departure_date"] = c.get("departure_date")
         n["return_date"] = c.get("return_date")
         normed.append(n)
 
+    if debug_total > 0 and debug_no_price == debug_total:
+        # loga uma vez só por rota (pra você ver no Actions e ter prova)
+        try:
+            sample = candidates[0].get("offer", {})
+            keys = list(sample.keys())[:30] if isinstance(sample, dict) else []
+            print(f"[WARN] {rk}: 100% ofertas sem preço parseável. sample keys={keys}")
+        except Exception:
+            pass
+
+    # filtros
     max_stops = watch.get("max_stops")
     if max_stops is not None:
         try:
             ms = int(max_stops)
-            normed = [o for o in normed if o["stops"] <= ms]
+            # ✅ NÃO filtra quando stops é 99 (desconhecido), senão mata tudo por falha de schema
+            normed = [o for o in normed if (o["stops"] == 99) or (o["stops"] <= ms)]
         except Exception:
             pass
 
@@ -445,7 +518,7 @@ def build_best_and_alerts(
     for r in routes_base:
         rk = route_key(r)
         watch = r.get("watch") or {}
-        best = pick_best_offer(offers_by_route.get(rk, []), watch)
+        best = pick_best_offer(offers_by_route.get(rk, []), watch, rk)
 
         adults = int(r.get("adults", 1))
         children = int(r.get("children", 0))
@@ -480,6 +553,7 @@ def build_best_and_alerts(
         }
         best_by_route[rk] = best_payload
 
+        # alerts
         target = safe_float(watch.get("target_price_total"))
         if target is not None and best["price_total"] <= target:
             alerts.append(
@@ -615,7 +689,6 @@ def main() -> None:
 
         for offer in data:
             offers_by_route[rk].append({"offer": offer, "departure_date": dep, "return_date": ret})
-
             append_history_line(
                 {
                     "run_id": rid,
@@ -648,7 +721,7 @@ def main() -> None:
     state = {
         "run_id": rid,
         "started_utc": started.strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "finished_utc": finished.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "finished_utc": finished.strftime("%Y-%m-%dT%H%M%SZ"),
         "duration_sec": duration_sec,
         "total_calls": total_calls,
         "ok_calls": ok_calls,
@@ -666,7 +739,7 @@ def main() -> None:
     summary = f"""# Flight Agent — Update Summary
 
 - started_utc: `{state["started_utc"]}`
-- finished_utc: `{state["finished_utc"]}`
+- finished_utc: `{utc_now_iso()}`
 - duration_sec: `{state["duration_sec"]}`
 - total_calls: `{state["total_calls"]}`
 - ok_calls: `{state["ok_calls"]}`
