@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -34,6 +35,7 @@ SUMMARY_FILE = DATA_DIR / "summary.md"
 HISTORY_FILE = DATA_DIR / "history.jsonl"
 BEST_FILE = DATA_DIR / "best_offers.json"
 ALERTS_FILE = DATA_DIR / "alerts.json"
+DEBUG_FILE = DATA_DIR / "debug_last_run.json"
 
 TZ_NAME = "America/Sao_Paulo"
 DEFAULT_MAX_RESULTS = int(os.getenv("MAX_RESULTS", "10"))
@@ -67,6 +69,13 @@ def safe_float(x: Any) -> Optional[float]:
     try:
         if x is None:
             return None
+        if isinstance(x, str):
+            s = x.strip().replace(" ", "")
+            if s.count(",") == 1 and s.count(".") == 0:
+                s = s.replace(",", ".")
+            elif s.count(",") >= 1 and s.count(".") >= 1:
+                s = s.replace(",", "")
+            x = s
         return float(x)
     except Exception:
         return None
@@ -80,9 +89,7 @@ def load_config() -> Dict[str, Any]:
 
 def route_key(route: Dict[str, Any]) -> str:
     rid = route.get("id")
-    if rid:
-        return str(rid)
-    return f'{route.get("origin","")}-{route.get("destination","")}:{route.get("cabin","")}'
+    return str(rid) if rid else f'{route.get("origin","")}-{route.get("destination","")}'
 
 
 # =============================
@@ -113,9 +120,9 @@ def validate_immutable_rules(routes_expanded: List[Dict[str, Any]]) -> None:
 # =============================
 def generate_rome_pairs(
     year: int,
-    start_mm_dd: Tuple[int, int] = (9, 1),
-    latest_return_mm_dd: Tuple[int, int] = (10, 5),
-    trip_days: int = 15,
+    start_mm_dd: Tuple[int, int],
+    latest_return_mm_dd: Tuple[int, int],
+    trip_days: int,
 ) -> List[Tuple[date, date]]:
     start = date(year, start_mm_dd[0], start_mm_dd[1])
     latest_return = date(year, latest_return_mm_dd[0], latest_return_mm_dd[1])
@@ -134,14 +141,13 @@ def generate_rome_pairs(
 def generate_weekend_pairs(
     base: date,
     horizon_days: int,
-    depart_dows: Tuple[int, int] = (4, 5),  # Sex(4) / Sáb(5)
-    return_dows: Tuple[int, int] = (6, 0),  # Dom(6) / Seg(0)
-    max_trip_len_days: int = 4,
+    depart_dows: Tuple[int, int],
+    return_dows: Tuple[int, int],
+    max_trip_len_days: int,
 ) -> List[Tuple[date, date]]:
     end = base + timedelta(days=horizon_days)
     pairs = set()
     d = base
-
     while d <= end:
         if d.weekday() in depart_dows:
             for k in range(1, max_trip_len_days + 1):
@@ -149,27 +155,31 @@ def generate_weekend_pairs(
                 if r <= end and r.weekday() in return_dows:
                     pairs.add((d, r))
         d += timedelta(days=1)
-
     return sorted(pairs)
 
 
-def expand_routes(routes_base: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+def cap_pairs(pairs: List[Tuple[date, date]], max_pairs: Optional[int]) -> List[Tuple[date, date]]:
+    if not max_pairs or max_pairs <= 0:
+        return pairs
+    # pega os mais “próximos” do começo da janela (boa estratégia pra achar promo cedo)
+    return pairs[:max_pairs]
+
+
+def expand_routes(routes_base: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
     today = local_today()
     expanded: List[Dict[str, Any]] = []
+    expanded_ranges: Dict[str, Any] = {}
 
     for r in routes_base:
+        rid = route_key(r)
         rule = (r.get("rule") or "").strip().upper()
-
-        # rota fixa sem rule
-        if r.get("departure_date") and r.get("return_date") and not rule:
-            expanded.append(r)
-            continue
+        params = r.get("rule_params") or {}
 
         if rule == "ROME_15D_WINDOW":
-            params = r.get("rule_params") or {}
             trip_days = int(params.get("trip_days", 15))
             start_mm_dd = tuple(params.get("start_mm_dd", [9, 1]))
             latest_return_mm_dd = tuple(params.get("latest_return_mm_dd", [10, 5]))
+            max_pairs = params.get("max_pairs")
 
             pairs = generate_rome_pairs(
                 year=today.year,
@@ -185,6 +195,10 @@ def expand_routes(routes_base: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                     trip_days=trip_days,
                 )
 
+            pairs = cap_pairs(pairs, int(max_pairs) if max_pairs is not None else None)
+            if pairs:
+                expanded_ranges[rid] = {"min_dep": pairs[0][0].isoformat(), "max_dep": pairs[-1][0].isoformat(), "count": len(pairs)}
+
             for dep, ret in pairs:
                 rr = dict(r)
                 rr["departure_date"] = dep.isoformat()
@@ -192,13 +206,14 @@ def expand_routes(routes_base: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                 expanded.append(rr)
 
         elif rule in ("WEEKEND_WINDOW", "WEEKEND_30D"):
-            params = r.get("rule_params") or {}
             start_offset_days = int(params.get("start_offset_days", 0))
             horizon_days = int(params.get("horizon_days", 30))
             depart_dows = tuple(params.get("depart_dows", [4, 5]))
             return_dows = tuple(params.get("return_dows", [6, 0]))
             max_trip_len_days = int(params.get("max_trip_len_days", 4))
+            max_pairs = params.get("max_pairs")
 
+            # ✅ PONTO CRÍTICO: base = hoje + offset
             base = today + timedelta(days=start_offset_days)
 
             pairs = generate_weekend_pairs(
@@ -208,6 +223,10 @@ def expand_routes(routes_base: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                 return_dows=return_dows,  # type: ignore
                 max_trip_len_days=max_trip_len_days,
             )
+            pairs = cap_pairs(pairs, int(max_pairs) if max_pairs is not None else None)
+
+            if pairs:
+                expanded_ranges[rid] = {"min_dep": pairs[0][0].isoformat(), "max_dep": pairs[-1][0].isoformat(), "count": len(pairs), "base": base.isoformat()}
 
             for dep, ret in pairs:
                 rr = dict(r)
@@ -216,22 +235,19 @@ def expand_routes(routes_base: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                 expanded.append(rr)
 
         else:
-            continue
+            # rota fixa (se alguém quiser)
+            if r.get("departure_date") and r.get("return_date"):
+                expanded.append(r)
 
-    # sanity log (ajuda você a ver D+60 no Actions)
-    by_id: Dict[str, List[str]] = {}
-    for rr in expanded:
-        rid = str(rr.get("id") or route_key(rr))
-        by_id.setdefault(rid, []).append(rr["departure_date"])
-    for rid, deps in by_id.items():
-        deps_sorted = sorted(deps)
-        print(f"[INFO] Expanded range for {rid}: {deps_sorted[0]} .. {deps_sorted[-1]} ({len(deps_sorted)} departures)")
+    # logs
+    for rid, info in expanded_ranges.items():
+        print(f"[INFO] Expanded range for {rid}: {info}")
 
-    return expanded
+    return expanded, expanded_ranges
 
 
 # =============================
-# Amadeus
+# Amadeus with retry/backoff
 # =============================
 def amadeus_base(env: str) -> str:
     return AMADEUS_TEST_BASE if env.lower() == "test" else AMADEUS_PROD_BASE
@@ -242,15 +258,43 @@ def amadeus_get_token(client_id: str, client_secret: str, env: str) -> str:
     url = f"{base}/v1/security/oauth2/token"
     resp = requests.post(
         url,
-        data={
-            "grant_type": "client_credentials",
-            "client_id": client_id,
-            "client_secret": client_secret,
-        },
+        data={"grant_type": "client_credentials", "client_id": client_id, "client_secret": client_secret},
         timeout=30,
     )
     resp.raise_for_status()
     return resp.json()["access_token"]
+
+
+def request_with_retry(method: str, url: str, *, headers: Dict[str, str], params: Dict[str, Any], retries: int = 4) -> requests.Response:
+    delay = 1.0
+    last_resp: Optional[requests.Response] = None
+
+    for attempt in range(1, retries + 1):
+        resp = requests.request(method, url, headers=headers, params=params, timeout=45)
+        last_resp = resp
+
+        # sucesso
+        if resp.status_code < 400:
+            return resp
+
+        # retry only for 429 / 5xx
+        if resp.status_code == 429 or 500 <= resp.status_code <= 599:
+            retry_after = resp.headers.get("Retry-After")
+            if retry_after:
+                try:
+                    delay = max(delay, float(retry_after))
+                except Exception:
+                    pass
+            print(f"[WARN] HTTP {resp.status_code} (attempt {attempt}/{retries}) -> sleeping {delay:.1f}s")
+            time.sleep(delay)
+            delay = min(delay * 2, 12.0)
+            continue
+
+        # 4xx não-retry
+        return resp
+
+    assert last_resp is not None
+    return last_resp
 
 
 def amadeus_search_offers(
@@ -266,7 +310,7 @@ def amadeus_search_offers(
     currency: str,
     direct_only: bool,
     max_results: int,
-) -> List[Dict[str, Any]]:
+) -> Tuple[Optional[List[Dict[str, Any]]], Optional[Dict[str, Any]]]:
     base = amadeus_base(env)
     url = f"{base}/v2/shopping/flight-offers"
 
@@ -286,131 +330,53 @@ def amadeus_search_offers(
         params["nonStop"] = "true"
 
     headers = {"Authorization": f"Bearer {token}"}
-    resp = requests.get(url, headers=headers, params=params, timeout=45)
+    resp = request_with_retry("GET", url, headers=headers, params=params, retries=4)
 
     if resp.status_code >= 400:
         try:
             payload = resp.json()
         except Exception:
             payload = {"error": resp.text}
-        return [{"_error": payload, "_status": resp.status_code}]
+        payload["_status"] = resp.status_code
+        return None, payload
 
-    payload = resp.json()
-    return payload.get("data", []) or []
+    try:
+        payload = resp.json()
+    except Exception as e:
+        return None, {"_status": 200, "error": f"invalid_json: {e}"}
+
+    return payload.get("data", []) or [], None
 
 
 # =============================
-# Offer normalization (FIX)
+# Offer normalization
 # =============================
-def _walk_find_price(obj: Any) -> Optional[float]:
-    """
-    Fallback agressivo: percorre dict/list procurando chaves típicas de preço.
-    Para não explodir CPU, limita profundidade de forma indireta pelo tamanho típico dos objetos.
-    """
-    if obj is None:
-        return None
-
-    if isinstance(obj, (int, float)):
-        return float(obj)
-
-    if isinstance(obj, str):
-        v = safe_float(obj)
-        return v
-
-    if isinstance(obj, dict):
-        # tentativas diretas
-        for k in ("grandTotal", "total", "totalPrice", "price_total", "total_price"):
-            if k in obj and obj.get(k) is not None:
-                v = safe_float(obj.get(k))
-                if v is not None:
-                    return v
-
-        # busca em subestruturas
-        for v0 in obj.values():
-            v = _walk_find_price(v0)
-            if v is not None:
-                return v
-
-    if isinstance(obj, list):
-        for it in obj:
-            v = _walk_find_price(it)
-            if v is not None:
-                return v
-
-    return None
-
-
 def extract_price_total(offer: Dict[str, Any]) -> Optional[float]:
-    # 1) padrão Amadeus
+    for k in ("price_total", "total_price", "total"):
+        v = safe_float(offer.get(k))
+        if v is not None:
+            return v
     p = offer.get("price")
     if isinstance(p, dict):
         v = safe_float(p.get("grandTotal")) or safe_float(p.get("total"))
         if v is not None:
             return v
-
-    # 2) alguns formatos alternativos (se existirem)
-    for k in ("price_total", "total_price", "total"):
-        if k in offer and offer.get(k) is not None:
-            v = safe_float(offer.get(k))
+    tp = offer.get("travelerPricings")
+    if isinstance(tp, list) and tp and isinstance(tp[0], dict):
+        pp = tp[0].get("price")
+        if isinstance(pp, dict):
+            v = safe_float(pp.get("grandTotal")) or safe_float(pp.get("total"))
             if v is not None:
                 return v
-
-    # 3) travelerPricings (total por viajante) — às vezes vem só aqui
-    tp = offer.get("travelerPricings")
-    if isinstance(tp, list) and tp:
-        # tenta pegar um total global, senão soma
-        totals = []
-        for t in tp:
-            if not isinstance(t, dict):
-                continue
-            pp = t.get("price")
-            if isinstance(pp, dict):
-                v = safe_float(pp.get("total")) or safe_float(pp.get("grandTotal"))
-                if v is not None:
-                    totals.append(v)
-        if totals:
-            # se vierem iguais (muitos payloads), pega o maior; se vierem individuais, soma
-            if len(set(round(x, 2) for x in totals)) == 1:
-                return totals[0]
-            return sum(totals)
-
-    # 4) fallback agressivo
-    return _walk_find_price(offer)
-
-
-def compute_stops(offer: Dict[str, Any]) -> int:
-    # tenta direto
-    s = offer.get("stops") or offer.get("number_of_stops")
-    if s is not None:
-        try:
-            return int(s)
-        except Exception:
-            pass
-
-    # calcula por itineraries/segments
-    try:
-        stops_calc = 0
-        its = offer.get("itineraries", []) or []
-        if isinstance(its, list):
-            for it in its:
-                if not isinstance(it, dict):
-                    continue
-                segs = it.get("segments", []) or []
-                if isinstance(segs, list) and segs:
-                    stops_calc = max(stops_calc, max(0, len(segs) - 1))
-            return int(stops_calc)
-    except Exception:
-        pass
-
-    return 99  # desconhecido
+    return None
 
 
 def normalize_offer(offer: Dict[str, Any]) -> Dict[str, Any]:
     price = extract_price_total(offer)
 
+    vac = offer.get("validatingAirlineCodes")
     carrier = offer.get("carrier") or offer.get("airline") or offer.get("validating_airline")
     if not carrier:
-        vac = offer.get("validatingAirlineCodes")
         if isinstance(vac, list) and vac:
             carrier = vac[0]
         elif isinstance(vac, str) and vac:
@@ -418,13 +384,21 @@ def normalize_offer(offer: Dict[str, Any]) -> Dict[str, Any]:
         else:
             carrier = "?"
 
-    stops = compute_stops(offer)
+    stops = None
+    try:
+        stops_calc = 0
+        for it in offer.get("itineraries", []) or []:
+            segs = it.get("segments", []) or []
+            stops_calc = max(stops_calc, max(0, len(segs) - 1))
+        stops = stops_calc
+    except Exception:
+        stops = 99
 
-    return {"price_total": price, "carrier": carrier, "stops": stops, "raw": offer}
+    return {"price_total": price, "carrier": carrier, "stops": int(stops), "raw": offer}
 
 
 # =============================
-# Best/Alerts persistence
+# Best/Alerts
 # =============================
 def load_prev_best() -> Dict[str, Any]:
     if not BEST_FILE.exists():
@@ -439,179 +413,48 @@ def load_prev_best() -> Dict[str, Any]:
         if "by_route" not in data or not isinstance(data.get("by_route"), dict):
             data["by_route"] = {}
         return data
-    except Exception as e:
-        print(f"[WARN] best_offers.json inválido ({e}). Resetando histórico de best.")
+    except Exception:
         return {"by_route": {}}
 
 
 def save_best(run_id: str, best_by_route: Dict[str, Any]) -> None:
-    payload = {"run_id": run_id, "updated_utc": utc_now_iso(), "by_route": best_by_route}
-    BEST_FILE.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    BEST_FILE.write_text(json.dumps({"run_id": run_id, "updated_utc": utc_now_iso(), "by_route": best_by_route}, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 def save_alerts(run_id: str, alerts: List[Dict[str, Any]]) -> None:
-    payload = {"run_id": run_id, "updated_utc": utc_now_iso(), "alerts": alerts}
-    ALERTS_FILE.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    ALERTS_FILE.write_text(json.dumps({"run_id": run_id, "updated_utc": utc_now_iso(), "alerts": alerts}, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
-def pick_best_offer(candidates: List[Dict[str, Any]], watch: Dict[str, Any], rk: str) -> Optional[Dict[str, Any]]:
-    normed: List[Dict[str, Any]] = []
-    debug_no_price = 0
-    debug_total = 0
-
+def pick_best_offer(candidates: List[Dict[str, Any]], watch: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    norm = []
     for c in candidates:
         offer = c.get("offer")
-        if not isinstance(offer, dict) or "_error" in offer:
+        if not isinstance(offer, dict):
             continue
-
-        debug_total += 1
         n = normalize_offer(offer)
         if n["price_total"] is None:
-            debug_no_price += 1
             continue
-
         n["departure_date"] = c.get("departure_date")
         n["return_date"] = c.get("return_date")
-        normed.append(n)
+        norm.append(n)
 
-    if debug_total > 0 and debug_no_price == debug_total:
-        # loga uma vez só por rota (pra você ver no Actions e ter prova)
-        try:
-            sample = candidates[0].get("offer", {})
-            keys = list(sample.keys())[:30] if isinstance(sample, dict) else []
-            print(f"[WARN] {rk}: 100% ofertas sem preço parseável. sample keys={keys}")
-        except Exception:
-            pass
-
-    # filtros
     max_stops = watch.get("max_stops")
     if max_stops is not None:
         try:
             ms = int(max_stops)
-            # ✅ NÃO filtra quando stops é 99 (desconhecido), senão mata tudo por falha de schema
-            normed = [o for o in normed if (o["stops"] == 99) or (o["stops"] <= ms)]
+            norm = [o for o in norm if o["stops"] <= ms]
         except Exception:
             pass
 
-    prefer_airlines = set(watch.get("prefer_airlines") or [])
-    if prefer_airlines:
-        preferred = [o for o in normed if o["carrier"] in prefer_airlines]
-        if preferred:
-            normed = preferred
-
-    if not normed:
+    if not norm:
         return None
-
-    normed.sort(key=lambda x: x["price_total"])
-    return normed[0]
-
-
-def build_best_and_alerts(
-    run_id: str,
-    routes_base: List[Dict[str, Any]],
-    offers_by_route: Dict[str, List[Dict[str, Any]]],
-) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
-    prev_best = load_prev_best().get("by_route", {})
-    best_by_route: Dict[str, Any] = {}
-    alerts: List[Dict[str, Any]] = []
-
-    for r in routes_base:
-        rk = route_key(r)
-        watch = r.get("watch") or {}
-        best = pick_best_offer(offers_by_route.get(rk, []), watch, rk)
-
-        adults = int(r.get("adults", 1))
-        children = int(r.get("children", 0))
-
-        if best is None:
-            best_by_route[rk] = {
-                "id": r.get("id"),
-                "origin": r.get("origin"),
-                "destination": r.get("destination"),
-                "adults": adults,
-                "children": children,
-                "carrier": None,
-                "stops": None,
-                "price_total": None,
-                "departure_date": None,
-                "return_date": None,
-                "note": "no_offers_after_filters",
-            }
-            continue
-
-        best_payload = {
-            "id": r.get("id"),
-            "origin": r.get("origin"),
-            "destination": r.get("destination"),
-            "adults": adults,
-            "children": children,
-            "carrier": best["carrier"],
-            "stops": best["stops"],
-            "price_total": best["price_total"],
-            "departure_date": best.get("departure_date"),
-            "return_date": best.get("return_date"),
-        }
-        best_by_route[rk] = best_payload
-
-        # alerts
-        target = safe_float(watch.get("target_price_total"))
-        if target is not None and best["price_total"] <= target:
-            alerts.append(
-                {
-                    "type": "TARGET_PRICE",
-                    "route_key": rk,
-                    "message": f'Alvo atingido: {r["origin"]}->{r["destination"]} <= {target:.2f}',
-                    "current_price": best["price_total"],
-                    "target_price": target,
-                    "carrier": best["carrier"],
-                    "stops": best["stops"],
-                    "departure_date": best.get("departure_date"),
-                    "return_date": best.get("return_date"),
-                    "adults": adults,
-                    "children": children,
-                }
-            )
-
-        prev = prev_best.get(rk, {})
-        prev_price = safe_float(prev.get("price_total"))
-        drop_pct = safe_float(watch.get("alert_drop_pct"))
-        if prev_price and drop_pct:
-            delta_pct = (prev_price - best["price_total"]) / prev_price * 100.0
-            if delta_pct >= drop_pct:
-                alerts.append(
-                    {
-                        "type": "DROP_PCT",
-                        "route_key": rk,
-                        "message": f'Queda {delta_pct:.1f}%: {r["origin"]}->{r["destination"]}',
-                        "current_price": best["price_total"],
-                        "prev_best_price": prev_price,
-                        "delta_pct": delta_pct,
-                        "carrier": best["carrier"],
-                        "stops": best["stops"],
-                        "departure_date": best.get("departure_date"),
-                        "return_date": best.get("return_date"),
-                        "adults": adults,
-                        "children": children,
-                    }
-                )
-
-    return best_by_route, alerts
+    norm.sort(key=lambda x: x["price_total"])
+    return norm[0]
 
 
-# =============================
-# Persistence
-# =============================
 def append_history_line(obj: Dict[str, Any]) -> None:
     with HISTORY_FILE.open("a", encoding="utf-8") as f:
         f.write(json.dumps(obj, ensure_ascii=False) + "\n")
-
-
-def save_state(state: Dict[str, Any]) -> None:
-    STATE_FILE.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
-
-
-def save_summary_md(summary: str) -> None:
-    SUMMARY_FILE.write_text(summary, encoding="utf-8")
 
 
 # =============================
@@ -623,7 +466,7 @@ def main() -> None:
 
     cfg = load_config()
     routes_base = cfg.get("routes") or []
-    routes_expanded = expand_routes(routes_base)
+    routes_expanded, expanded_ranges = expand_routes(routes_base)
 
     validate_immutable_rules(routes_expanded)
 
@@ -631,131 +474,158 @@ def main() -> None:
     client_id = os.getenv("AMADEUS_CLIENT_ID") or ""
     client_secret = os.getenv("AMADEUS_CLIENT_SECRET") or ""
     if not client_id or not client_secret:
-        raise RuntimeError("Faltam secrets AMADEUS_CLIENT_ID / AMADEUS_CLIENT_SECRET no ambiente.")
+        raise RuntimeError("Faltam AMADEUS_CLIENT_ID / AMADEUS_CLIENT_SECRET.")
 
     max_results = int(os.getenv("MAX_RESULTS", str(DEFAULT_MAX_RESULTS)))
 
     print(f"[INFO] Run: {rid}")
-    print(f"[INFO] Repo root: {REPO_ROOT}")
-    print(f"[INFO] Data dir:  {DATA_DIR}")
-    print(f"[INFO] Store: default | Env: {amadeus_env} | Max results: {max_results}")
-    print(f"[INFO] Routes expanded: {len(routes_expanded)} | Routes base: {len(routes_base)} | Routes file: {ROUTES_FILE}")
+    print(f"[INFO] Routes expanded: {len(routes_expanded)} | Routes base: {len(routes_base)} | Env: {amadeus_env} | Max results: {max_results}")
 
     token = amadeus_get_token(client_id, client_secret, amadeus_env)
 
     offers_by_route: Dict[str, List[Dict[str, Any]]] = {}
+    errors_by_route: Dict[str, List[Dict[str, Any]]] = {}
+
     ok_calls = 0
     err_calls = 0
     offers_saved = 0
-    total_calls = len(routes_expanded)
 
-    for idx, r in enumerate(routes_expanded, start=1):
-        origin = r["origin"]
-        dest = r["destination"]
-        dep = r["departure_date"]
-        ret = r["return_date"]
-        adults = int(r.get("adults", 1))
-        children = int(r.get("children", 0))
-        cabin = str(r.get("cabin", "ECONOMY")).upper()
-        currency = str(r.get("currency", "BRL")).upper()
-        direct_only = bool(r.get("direct_only", False))
+    debug = {"run_id": rid, "expanded_ranges": expanded_ranges, "errors_sample": {}, "offers_sample": {}}
 
+    for r in routes_expanded:
         rk = route_key(r)
         offers_by_route.setdefault(rk, [])
+        errors_by_route.setdefault(rk, [])
 
-        data = amadeus_search_offers(
+        offers, err = amadeus_search_offers(
             token=token,
             env=amadeus_env,
-            origin=origin,
-            destination=dest,
-            departure_date=dep,
-            return_date=ret,
-            adults=adults,
-            children=children,
-            cabin=cabin,
-            currency=currency,
-            direct_only=direct_only,
+            origin=r["origin"],
+            destination=r["destination"],
+            departure_date=r["departure_date"],
+            return_date=r["return_date"],
+            adults=int(r.get("adults", 1)),
+            children=int(r.get("children", 0)),
+            cabin=str(r.get("cabin", "ECONOMY")).upper(),
+            currency=str(r.get("currency", "BRL")).upper(),
+            direct_only=bool(r.get("direct_only", False)),
             max_results=max_results,
         )
 
-        if data and isinstance(data, list) and isinstance(data[0], dict) and "_error" in data[0]:
+        if err is not None:
             err_calls += 1
-            print(f"[ERR] ({idx}/{total_calls}) {origin}->{dest} {dep}/{ret} | error_status={data[0].get('_status')}")
+            errors_by_route[rk].append({"ctx": {k: r.get(k) for k in ("origin","destination","departure_date","return_date","adults","children","direct_only")}, "err": err})
+            if rk not in debug["errors_sample"]:
+                debug["errors_sample"][rk] = err
             continue
 
         ok_calls += 1
-        offers_saved += len(data)
-        print(f"[OK] ({idx}/{total_calls}) {origin}->{dest} {dep}/{ret} | offers: {len(data)}")
+        assert offers is not None
+        offers_saved += len(offers)
 
-        for offer in data:
-            offers_by_route[rk].append({"offer": offer, "departure_date": dep, "return_date": ret})
+        if offers and rk not in debug["offers_sample"]:
+            debug["offers_sample"][rk] = {"sample_offer_price": extract_price_total(offers[0]), "sample_offer": offers[0]}
+
+        for offer in offers:
+            offers_by_route[rk].append({"offer": offer, "departure_date": r["departure_date"], "return_date": r["return_date"]})
             append_history_line(
                 {
                     "run_id": rid,
                     "ts_utc": utc_now_iso(),
-                    "route_id": r.get("id"),
                     "route_key": rk,
-                    "origin": origin,
-                    "destination": dest,
-                    "departure_date": dep,
-                    "return_date": ret,
-                    "adults": adults,
-                    "children": children,
-                    "cabin": cabin,
-                    "currency": currency,
-                    "direct_only": direct_only,
+                    "origin": r["origin"],
+                    "destination": r["destination"],
+                    "departure_date": r["departure_date"],
+                    "return_date": r["return_date"],
+                    "adults": int(r.get("adults", 1)),
+                    "children": int(r.get("children", 0)),
+                    "direct_only": bool(r.get("direct_only", False)),
                     "offer": offer,
                 }
             )
 
-    best_by_route, alerts = build_best_and_alerts(rid, routes_base, offers_by_route)
+    # Best + alerts
+    best_by_route: Dict[str, Any] = {}
+    alerts: List[Dict[str, Any]] = []
 
-    print(f"[INFO] Writing best offers: {BEST_FILE}")
+    for r in routes_base:
+        rk = route_key(r)
+        watch = r.get("watch") or {}
+        best = pick_best_offer(offers_by_route.get(rk, []), watch)
+
+        if best is None:
+            # motivo simples
+            note = "no_offers_after_filters"
+            if errors_by_route.get(rk) and not offers_by_route.get(rk):
+                note = "all_calls_failed"
+            elif not errors_by_route.get(rk) and not offers_by_route.get(rk):
+                note = "no_offers_returned"
+
+            best_by_route[rk] = {
+                "id": r.get("id"),
+                "origin": r.get("origin"),
+                "destination": r.get("destination"),
+                "adults": int(r.get("adults", 1)),
+                "children": int(r.get("children", 0)),
+                "carrier": None,
+                "stops": None,
+                "price_total": None,
+                "departure_date": None,
+                "return_date": None,
+                "note": note,
+            }
+            continue
+
+        best_by_route[rk] = {
+            "id": r.get("id"),
+            "origin": r.get("origin"),
+            "destination": r.get("destination"),
+            "adults": int(r.get("adults", 1)),
+            "children": int(r.get("children", 0)),
+            "carrier": best["carrier"],
+            "stops": best["stops"],
+            "price_total": best["price_total"],
+            "departure_date": best.get("departure_date"),
+            "return_date": best.get("return_date"),
+        }
+
+        target = safe_float((watch.get("target_price_total")))
+        if target is not None and best["price_total"] <= target:
+            alerts.append({"type": "TARGET_PRICE", "route_key": rk, "current_price": best["price_total"], "target_price": target})
+
     save_best(rid, best_by_route)
-    print(f"[INFO] Writing alerts:     {ALERTS_FILE}")
     save_alerts(rid, alerts)
+    DEBUG_FILE.write_text(json.dumps(debug, ensure_ascii=False, indent=2), encoding="utf-8")
 
     finished = utc_now()
-    duration_sec = int((finished - started).total_seconds())
-
     state = {
         "run_id": rid,
         "started_utc": started.strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "finished_utc": finished.strftime("%Y-%m-%dT%H%M%SZ"),
-        "duration_sec": duration_sec,
-        "total_calls": total_calls,
+        "finished_utc": finished.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "duration_sec": int((finished - started).total_seconds()),
+        "total_calls": len(routes_expanded),
         "ok_calls": ok_calls,
         "err_calls": err_calls,
-        "success_rate": (ok_calls / total_calls) if total_calls else 0.0,
+        "success_rate": (ok_calls / len(routes_expanded)) if routes_expanded else 0.0,
         "offers_saved": offers_saved,
-        "store": "default",
-        "max_results": max_results,
         "amadeus_env": amadeus_env,
-        "immutable_required_origins": IMMUTABLE_REQUIRED_ORIGINS,
-        "immutable_required_dests": IMMUTABLE_REQUIRED_DESTS,
+        "max_results": max_results,
+        "expanded_ranges": expanded_ranges,
     }
-    save_state(state)
+    STATE_FILE.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
 
-    summary = f"""# Flight Agent — Update Summary
+    SUMMARY_FILE.write_text(
+        f"# Flight Agent — Update Summary\n\n"
+        f"- run_id: `{rid}`\n"
+        f"- ok_calls: `{ok_calls}`\n"
+        f"- err_calls: `{err_calls}`\n"
+        f"- offers_saved: `{offers_saved}`\n"
+        f"- total_calls: `{len(routes_expanded)}`\n"
+        f"- expanded_ranges: `{json.dumps(expanded_ranges, ensure_ascii=False)}`\n",
+        encoding="utf-8",
+    )
 
-- started_utc: `{state["started_utc"]}`
-- finished_utc: `{utc_now_iso()}`
-- duration_sec: `{state["duration_sec"]}`
-- total_calls: `{state["total_calls"]}`
-- ok_calls: `{state["ok_calls"]}`
-- err_calls: `{state["err_calls"]}`
-- success_rate: `{state["success_rate"]:.3f}`
-- offers_saved: `{state["offers_saved"]}`
-- store: `{state["store"]}`
-- max_results: `{state["max_results"]}`
-- amadeus_env: `{state["amadeus_env"]}`
-- immutable_required_origins: `{state["immutable_required_origins"]}`
-- immutable_required_dests: `{state["immutable_required_dests"]}`
-
-[OK] Run completed successfully.
-"""
-    save_summary_md(summary)
-    print(summary)
+    print("[OK] Run completed successfully.")
 
 
 if __name__ == "__main__":
