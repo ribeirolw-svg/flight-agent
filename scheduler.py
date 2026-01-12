@@ -11,10 +11,9 @@ from typing import Any, Dict, List, Optional, Tuple
 import requests
 import yaml
 
-
-# -----------------------------
+# =============================
 # Paths
-# -----------------------------
+# =============================
 REPO_ROOT = Path(__file__).resolve().parent
 DATA_DIR = REPO_ROOT / "data"
 DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -25,26 +24,44 @@ HISTORY_FILE = DATA_DIR / "history.jsonl"
 BEST_FILE = DATA_DIR / "best_offers.json"
 ALERTS_FILE = DATA_DIR / "alerts.json"
 DEBUG_FILE = DATA_DIR / "debug_last_run.json"
+RR_FILE = DATA_DIR / "rr_state.json"
 
 ROUTES_FILE = REPO_ROOT / "routes.yaml"
 
-
-# -----------------------------
-# Env knobs
-# -----------------------------
+# =============================
+# Env knobs (SAFE defaults)
+# =============================
 AMADEUS_ENV = os.getenv("AMADEUS_ENV", "test").strip().lower()
-MAX_RESULTS = int(os.getenv("MAX_RESULTS", "10"))
+MAX_RESULTS = int(os.getenv("MAX_RESULTS", "5"))
 
-REQUEST_SLEEP_SEC = float(os.getenv("REQUEST_SLEEP_SEC", "0.6"))
-MAX_429_BEFORE_ABORT = int(os.getenv("MAX_429_BEFORE_ABORT", "3"))
+# throttle between calls
+REQUEST_SLEEP_SEC = float(os.getenv("REQUEST_SLEEP_SEC", "2.5"))
+
+# hard-cooldown to "esfriar" o ambiente test
+COOLDOWN_BEFORE_START_SEC = float(os.getenv("COOLDOWN_BEFORE_START_SEC", "12"))
+COOLDOWN_ON_429_SEC = float(os.getenv("COOLDOWN_ON_429_SEC", "25"))
+
+# abort early when 429 happens (safe mode: 1)
+MAX_429_BEFORE_ABORT = int(os.getenv("MAX_429_BEFORE_ABORT", "1"))
+
+# safe mode: query only one base route per run
+SAFE_MODE = os.getenv("SAFE_MODE", "1").strip() not in ("0", "false", "False", "")
+
+# optionally force a route id on a run (e.g. FORCE_ROUTE_ID=ROMA_GRU_FCO_2A1C_DIRECT)
+FORCE_ROUTE_ID = os.getenv("FORCE_ROUTE_ID", "").strip()
 
 AMADEUS_CLIENT_ID = os.getenv("AMADEUS_CLIENT_ID", "").strip()
 AMADEUS_CLIENT_SECRET = os.getenv("AMADEUS_CLIENT_SECRET", "").strip()
 
+# =============================
+# Immutable guardrails
+# =============================
+IMMUTABLE_REQUIRED_ORIGINS = ["CGH", "GRU"]
+IMMUTABLE_REQUIRED_DESTS = ["CWB", "FCO", "NVT"]
 
-# -----------------------------
+# =============================
 # Utilities
-# -----------------------------
+# =============================
 def utc_now_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -62,23 +79,10 @@ def safe_float(x: Any) -> Optional[float]:
         return None
 
 
-def safe_int(x: Any, default: int = 0) -> int:
-    try:
-        return int(x)
-    except Exception:
-        return default
-
-
 def load_yaml(path: Path) -> Dict[str, Any]:
     if not path.exists():
         raise FileNotFoundError(f"routes file not found: {path}")
     return yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-
-
-def append_history_line(obj: Dict[str, Any]) -> None:
-    HISTORY_FILE.parent.mkdir(parents=True, exist_ok=True)
-    with HISTORY_FILE.open("a", encoding="utf-8") as f:
-        f.write(json.dumps(obj, ensure_ascii=False) + "\n")
 
 
 def write_json(path: Path, payload: Any) -> None:
@@ -98,11 +102,32 @@ def read_json(path: Path, default: Any) -> Any:
         return default
 
 
-# -----------------------------
+def append_history_line(obj: Dict[str, Any]) -> None:
+    HISTORY_FILE.parent.mkdir(parents=True, exist_ok=True)
+    with HISTORY_FILE.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(obj, ensure_ascii=False) + "\n")
+
+
+def validate_immutable(routes_base: List[Dict[str, Any]]) -> None:
+    origins = sorted({r.get("origin") for r in routes_base if r.get("origin")})
+    dests = sorted({r.get("destination") for r in routes_base if r.get("destination")})
+
+    missing_o = [x for x in IMMUTABLE_REQUIRED_ORIGINS if x not in origins]
+    missing_d = [x for x in IMMUTABLE_REQUIRED_DESTS if x not in dests]
+
+    if missing_o or missing_d:
+        print("[FATAL] routes.yaml violou regras imutáveis.")
+        if missing_o:
+            print(f"[FATAL] Origens faltando: {missing_o}")
+        if missing_d:
+            print(f"[FATAL] Destinos faltando: {missing_d}")
+        raise SystemExit(1)
+
+
+# =============================
 # Amadeus API
-# -----------------------------
+# =============================
 def amadeus_base_url(env: str) -> str:
-    # test vs production
     return "https://test.api.amadeus.com" if env == "test" else "https://api.amadeus.com"
 
 
@@ -121,8 +146,7 @@ def amadeus_get_token(env: str, client_id: str, client_secret: str) -> str:
         timeout=45,
     )
     resp.raise_for_status()
-    data = resp.json()
-    return data["access_token"]
+    return resp.json()["access_token"]
 
 
 def request_with_retry(
@@ -131,7 +155,7 @@ def request_with_retry(
     *,
     headers: Dict[str, str],
     params: Dict[str, Any],
-    retries: int = 3,
+    retries: int = 2,  # SAFE: low retry; test env fica quente
 ) -> requests.Response:
     delay = 1.0
     last_resp: Optional[requests.Response] = None
@@ -151,12 +175,12 @@ def request_with_retry(
                     delay = max(delay, float(retry_after))
                 except Exception:
                     pass
+
             print(f"[WARN] HTTP {resp.status_code} (attempt {attempt}/{retries}) -> sleeping {delay:.1f}s")
             time.sleep(delay)
-            delay = min(delay * 2, 12.0)
+            delay = min(delay * 2, 10.0)
             continue
 
-        # 4xx non-retry
         return resp
 
     assert last_resp is not None
@@ -195,7 +219,7 @@ def amadeus_search_offers(
     if direct_only:
         params["nonStop"] = "true"
 
-    resp = request_with_retry("GET", url, headers=headers, params=params, retries=3)
+    resp = request_with_retry("GET", url, headers=headers, params=params, retries=2)
 
     if resp.status_code >= 400:
         body_txt = ""
@@ -209,7 +233,6 @@ def amadeus_search_offers(
         }
         try:
             j = resp.json()
-            # Amadeus costuma vir em "errors"
             if isinstance(j, dict) and "errors" in j:
                 err_payload["errors"] = j.get("errors")
             else:
@@ -229,9 +252,9 @@ def amadeus_search_offers(
     return data, None
 
 
-# -----------------------------
+# =============================
 # Offer normalization (best/alerts)
-# -----------------------------
+# =============================
 def extract_price_total(offer: Dict[str, Any]) -> Optional[float]:
     try:
         p = offer.get("price", {}).get("grandTotal")
@@ -261,8 +284,6 @@ def extract_carrier(offer: Dict[str, Any]) -> str:
 
 
 def extract_stops(offer: Dict[str, Any]) -> Optional[int]:
-    # stops = total segments across itineraries - number of itineraries
-    # (roundtrip: 2 itineraries). We'll compute max(segments-1) across itineraries and sum.
     try:
         itins = offer.get("itineraries", [])
         if not isinstance(itins, list) or not itins:
@@ -304,7 +325,6 @@ def pick_best_offer(offers_meta: List[OfferMeta], watch: Dict[str, Any]) -> Opti
         carrier = extract_carrier(om.offer)
         stops = extract_stops(om.offer)
 
-        # filter stops if requested
         if max_stops_i is not None and stops is not None and stops > max_stops_i:
             continue
 
@@ -313,7 +333,6 @@ def pick_best_offer(offers_meta: List[OfferMeta], watch: Dict[str, Any]) -> Opti
     if not candidates:
         return None
 
-    # airline preference
     if prefer_airlines:
         preferred = [c for c in candidates if c[2] in prefer_airlines]
         if preferred:
@@ -324,7 +343,6 @@ def pick_best_offer(offers_meta: List[OfferMeta], watch: Dict[str, Any]) -> Opti
 
 
 def load_prev_best() -> Dict[str, Any]:
-    # tolerate empty/invalid file
     payload = read_json(BEST_FILE, {"by_route": {}})
     if not isinstance(payload, dict):
         return {"by_route": {}}
@@ -346,7 +364,6 @@ def build_best_and_alerts(
     for base in routes_base:
         route_id = base["id"]
         watch = base.get("watch") or {}
-
         best_pick = pick_best_offer(offers_by_route.get(route_id, []), watch)
 
         if best_pick is None:
@@ -380,7 +397,7 @@ def build_best_and_alerts(
         }
         best_by_route[route_id] = best_payload
 
-        # Alerts: target
+        # target alerts
         target = safe_float(watch.get("target_price_total"))
         if target is not None and price <= target:
             alerts.append(
@@ -397,7 +414,7 @@ def build_best_and_alerts(
                 }
             )
 
-        # Alerts: drop pct vs previous best
+        # drop pct alerts
         prev = prev_best.get(route_id, {})
         prev_price = safe_float(prev.get("price_total"))
         drop_pct = safe_float(watch.get("alert_drop_pct"))
@@ -422,9 +439,9 @@ def build_best_and_alerts(
     return best_by_route, alerts
 
 
-# -----------------------------
+# =============================
 # Rules: expand routes
-# -----------------------------
+# =============================
 def parse_mm_dd(x: Any) -> Tuple[int, int]:
     if isinstance(x, (list, tuple)) and len(x) == 2:
         return int(x[0]), int(x[1])
@@ -443,20 +460,17 @@ def daterange(start: date, end: date) -> List[date]:
 def expand_rome_15d_window(base: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
     rp = base.get("rule_params") or {}
     trip_days = int(rp.get("trip_days", 15))
-    max_pairs = int(rp.get("max_pairs", 10))
-    step_days = int(rp.get("step_days", 2))
+    max_pairs = int(rp.get("max_pairs", 2))         # SAFE default: 2
+    step_days = int(rp.get("step_days", 4))         # SAFE default: 4
 
     start_mm_dd = parse_mm_dd(rp.get("start_mm_dd", [9, 1]))
     latest_ret_mm_dd = parse_mm_dd(rp.get("latest_return_mm_dd", [10, 5]))
 
-    # window in next year relative to current year (good enough for your use)
     today = datetime.now().date()
     year = today.year if today.month <= 10 else today.year + 1
 
     min_dep = date(year, start_mm_dd[0], start_mm_dd[1])
     latest_return = date(year, latest_ret_mm_dd[0], latest_ret_mm_dd[1])
-
-    # dep must satisfy dep + trip_days <= latest_return
     max_dep = latest_return - timedelta(days=trip_days)
 
     pairs: List[Dict[str, Any]] = []
@@ -470,35 +484,28 @@ def expand_rome_15d_window(base: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], 
         pairs.append(r)
         cur += timedelta(days=step_days)
 
-    meta = {
-        "min_dep": min_dep.isoformat(),
-        "max_dep": max_dep.isoformat(),
-        "count": len(pairs),
-        "step_days": step_days,
-    }
+    meta = {"min_dep": min_dep.isoformat(), "max_dep": max_dep.isoformat(), "count": len(pairs), "step_days": step_days}
     return pairs, meta
 
 
 def expand_weekend_window(base: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
     rp = base.get("rule_params") or {}
-    start_offset_days = int(rp.get("start_offset_days", 60))
-    horizon_days = int(rp.get("horizon_days", 60))
-    max_pairs = int(rp.get("max_pairs", 16))
+    start_offset_days = int(rp.get("start_offset_days", 60))  # D+60
+    horizon_days = int(rp.get("horizon_days", 60))            # janela de 60 dias
+    max_pairs = int(rp.get("max_pairs", 6))                   # SAFE default: 6
     max_trip_len_days = int(rp.get("max_trip_len_days", 4))
-    depart_dows = [int(x) for x in (rp.get("depart_dows") or [4, 5])]  # 0=Mon..6=Sun
-    return_dows = [int(x) for x in (rp.get("return_dows") or [6, 0])]
+    depart_dows = [int(x) for x in (rp.get("depart_dows") or [4, 5])]  # Fri/Sat
+    return_dows = [int(x) for x in (rp.get("return_dows") or [6, 0])]  # Sun/Mon
 
     today = datetime.now().date()
     base_day = today + timedelta(days=start_offset_days)
     end_day = base_day + timedelta(days=horizon_days)
 
     pairs: List[Dict[str, Any]] = []
-    # generate departure candidates within window matching depart_dows
     for dep in daterange(base_day, end_day):
         if dep.weekday() not in depart_dows:
             continue
 
-        # return candidates within trip len constraint matching return_dows
         for d in range(1, max_trip_len_days + 1):
             ret = dep + timedelta(days=d)
             if ret > end_day:
@@ -512,78 +519,57 @@ def expand_weekend_window(base: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], D
             pairs.append(r)
 
             if len(pairs) >= max_pairs:
-                meta = {
-                    "base": base_day.isoformat(),
-                    "min_dep": base_day.isoformat(),
-                    "max_dep": (base_day + timedelta(days=min(horizon_days, 999999))).isoformat(),
-                    "count": len(pairs),
-                }
+                meta = {"base": base_day.isoformat(), "min_dep": base_day.isoformat(), "max_dep": end_day.isoformat(), "count": len(pairs)}
                 return pairs, meta
 
-    meta = {
-        "base": base_day.isoformat(),
-        "min_dep": base_day.isoformat(),
-        "max_dep": end_day.isoformat(),
-        "count": len(pairs),
-    }
+    meta = {"base": base_day.isoformat(), "min_dep": base_day.isoformat(), "max_dep": end_day.isoformat(), "count": len(pairs)}
     return pairs, meta
 
 
-def expand_routes(routes_base: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
-    expanded: List[Dict[str, Any]] = []
-    ranges: Dict[str, Any] = {}
+def expand_one_route(base: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    rule = (base.get("rule") or "").strip().upper()
+    if rule == "ROME_15D_WINDOW":
+        return expand_rome_15d_window(base)
+    if rule == "WEEKEND_WINDOW":
+        return expand_weekend_window(base)
 
-    for base in routes_base:
-        rule = (base.get("rule") or "").strip().upper()
-        if rule == "ROME_15D_WINDOW":
-            pairs, meta = expand_rome_15d_window(base)
-            expanded.extend(pairs)
-            ranges[base["id"]] = meta
-        elif rule == "WEEKEND_WINDOW":
-            pairs, meta = expand_weekend_window(base)
-            expanded.extend(pairs)
-            ranges[base["id"]] = meta
-        else:
-            # fallback: if explicit dep/ret exists
-            if base.get("departure_date") and base.get("return_date"):
-                expanded.append(base)
-                ranges[base["id"]] = {
-                    "min_dep": base["departure_date"],
-                    "max_dep": base["departure_date"],
-                    "count": 1,
-                }
-            else:
-                ranges[base["id"]] = {"note": "no_rule_and_no_explicit_dates", "count": 0}
+    # fallback explicit
+    if base.get("departure_date") and base.get("return_date"):
+        meta = {"min_dep": base["departure_date"], "max_dep": base["departure_date"], "count": 1}
+        return [base], meta
 
-    return expanded, ranges
+    return [], {"note": "no_rule_and_no_explicit_dates", "count": 0}
 
 
-# -----------------------------
-# Immutable guardrails
-# -----------------------------
-IMMUTABLE_REQUIRED_ORIGINS = ["CGH", "GRU"]
-IMMUTABLE_REQUIRED_DESTS = ["CWB", "FCO", "NVT"]
+# =============================
+# Round-robin route picker (SAFE)
+# =============================
+def rr_pick_route_id(routes_base: List[Dict[str, Any]]) -> str:
+    # if forced, honor it (but still validate it exists)
+    if FORCE_ROUTE_ID:
+        ids = {r["id"] for r in routes_base}
+        if FORCE_ROUTE_ID not in ids:
+            raise RuntimeError(f"FORCE_ROUTE_ID='{FORCE_ROUTE_ID}' not found in routes.yaml ids")
+        return FORCE_ROUTE_ID
+
+    # default fixed order for stability
+    # (keeps Rome in the rotation but not always first)
+    order = [r["id"] for r in routes_base]
+
+    rr = read_json(RR_FILE, {"idx": 0})
+    idx = int(rr.get("idx", 0)) if isinstance(rr, dict) else 0
+    if not order:
+        raise RuntimeError("no routes_base")
+
+    picked = order[idx % len(order)]
+    rr_next = {"idx": (idx + 1) % len(order), "picked_last": picked, "updated_utc": utc_now_iso()}
+    write_json(RR_FILE, rr_next)
+    return picked
 
 
-def validate_immutable(routes_base: List[Dict[str, Any]]) -> None:
-    origins = sorted({r.get("origin") for r in routes_base if r.get("origin")})
-    dests = sorted({r.get("destination") for r in routes_base if r.get("destination")})
-
-    missing_o = [x for x in IMMUTABLE_REQUIRED_ORIGINS if x not in origins]
-    missing_d = [x for x in IMMUTABLE_REQUIRED_DESTS if x not in dests]
-
-    if missing_o or missing_d:
-        print("[FATAL] routes.yaml violou regras imutáveis.")
-        if missing_o:
-            print(f"[FATAL] Origens faltando: {missing_o}")
-        if missing_d:
-            print(f"[FATAL] Destinos faltando: {missing_d}")
-        raise SystemExit(1)
-
-
-# -----------------------------
+# =============================
 # Main
-# -----------------------------
+# =============================
 def main() -> None:
     rid = run_id()
     started = utc_now_iso()
@@ -592,6 +578,7 @@ def main() -> None:
     print(f"[INFO] Repo root: {REPO_ROOT}")
     print(f"[INFO] Data dir:  {DATA_DIR}")
     print(f"[INFO] Store: default | Env: {AMADEUS_ENV} | Max results: {MAX_RESULTS}")
+    print(f"[INFO] SAFE_MODE: {SAFE_MODE} | FORCE_ROUTE_ID: {FORCE_ROUTE_ID or '(none)'}")
 
     cfg = load_yaml(ROUTES_FILE)
     routes_base = cfg.get("routes") or []
@@ -606,18 +593,37 @@ def main() -> None:
 
     validate_immutable(routes_base)
 
-    # Expand based on rule
-    routes_expanded, expanded_ranges = expand_routes(routes_base)
+    # choose which base route to run
+    selected_route_id: Optional[str] = None
+    if SAFE_MODE:
+        selected_route_id = rr_pick_route_id(routes_base)
+        print(f"[INFO] SAFE_MODE selected route_id: {selected_route_id}")
+        routes_to_run = [r for r in routes_base if r["id"] == selected_route_id]
+    else:
+        routes_to_run = routes_base[:]
 
-    print(f"[INFO] Routes expanded: {len(routes_expanded)} | Routes base: {len(routes_base)} | Routes file: {ROUTES_FILE}")
+    # expand routes (only selected in SAFE_MODE)
+    expanded_routes: List[Dict[str, Any]] = []
+    expanded_ranges: Dict[str, Any] = {}
 
-    # debug payload
+    for base in routes_to_run:
+        pairs, meta = expand_one_route(base)
+        expanded_routes.extend(pairs)
+        expanded_ranges[base["id"]] = meta
+
+    print(f"[INFO] Routes expanded: {len(expanded_routes)} | Routes base: {len(routes_base)} | Selected: {len(routes_to_run)}")
+
+    # Prepare debug payload
     debug: Dict[str, Any] = {
         "run_id": rid,
-        "ts_utc": started,
+        "started_utc": started,
         "env": AMADEUS_ENV,
         "max_results": MAX_RESULTS,
+        "safe_mode": SAFE_MODE,
+        "selected_route_id": selected_route_id,
         "request_sleep_sec": REQUEST_SLEEP_SEC,
+        "cooldown_before_start_sec": COOLDOWN_BEFORE_START_SEC,
+        "cooldown_on_429_sec": COOLDOWN_ON_429_SEC,
         "max_429_before_abort": MAX_429_BEFORE_ABORT,
         "expanded_ranges": expanded_ranges,
         "errors_sample": {},
@@ -625,7 +631,7 @@ def main() -> None:
         "status_counts": {},
     }
 
-    # state counters
+    # Counters
     total_calls = 0
     ok_calls = 0
     err_calls = 0
@@ -635,23 +641,51 @@ def main() -> None:
     status_counts: Dict[str, int] = {}
     consecutive_429 = 0
 
+    # Store offers for best/alerts
     offers_by_route: Dict[str, List[OfferMeta]] = {r["id"]: [] for r in routes_base}
 
-    # token
+    # Get token
     try:
         token = amadeus_get_token(AMADEUS_ENV, AMADEUS_CLIENT_ID, AMADEUS_CLIENT_SECRET)
     except Exception as e:
-        # hard fail: cannot proceed
         err = {"_status": "TOKEN_ERROR", "message": str(e)}
         debug["errors_sample"]["TOKEN"] = err
         write_json(DEBUG_FILE, debug)
+        # write minimal artifacts to avoid "sumir tudo"
+        finished = utc_now_iso()
+        write_json(STATE_FILE, {
+            "run_id": rid,
+            "started_utc": started,
+            "finished_utc": finished,
+            "duration_sec": 0,
+            "total_calls": 0,
+            "ok_calls": 0,
+            "err_calls": 1,
+            "empty_ok_calls": 0,
+            "success_rate": 0,
+            "offers_saved": 0,
+            "store": "default",
+            "max_results": MAX_RESULTS,
+            "amadeus_env": AMADEUS_ENV,
+            "immutable_required_origins": IMMUTABLE_REQUIRED_ORIGINS,
+            "immutable_required_dests": IMMUTABLE_REQUIRED_DESTS,
+            "expanded_ranges": expanded_ranges,
+            "request_sleep_sec": REQUEST_SLEEP_SEC,
+            "max_429_before_abort": MAX_429_BEFORE_ABORT,
+            "status_counts": {"TOKEN_ERROR": 1},
+        })
+        write_json(BEST_FILE, {"run_id": rid, "updated_utc": finished, "by_route": {}})
+        write_json(ALERTS_FILE, {"run_id": rid, "updated_utc": finished, "alerts": []})
+        SUMMARY_FILE.write_text("# Flight Agent — Update Summary\n\n- token_error\n", encoding="utf-8")
         raise
 
-    # execute calls
-    for idx, r in enumerate(routes_expanded, start=1):
-        route_id = r["id"]
-        rk = route_id
+    # Cooldown before starting calls (SAFE)
+    if AMADEUS_ENV == "test" and COOLDOWN_BEFORE_START_SEC > 0:
+        print(f"[INFO] Cooldown before start: sleeping {COOLDOWN_BEFORE_START_SEC:.0f}s (test env)")
+        time.sleep(COOLDOWN_BEFORE_START_SEC)
 
+    # Execute calls
+    for idx, r in enumerate(expanded_routes, start=1):
         total_calls += 1
 
         offers, err = amadeus_search_offers(
@@ -671,6 +705,8 @@ def main() -> None:
 
         time.sleep(REQUEST_SLEEP_SEC)
 
+        route_id = r["id"]
+
         if err is not None:
             err_calls += 1
             stc = str(err.get("_status", "unknown"))
@@ -678,12 +714,13 @@ def main() -> None:
 
             if stc == "429":
                 consecutive_429 += 1
+                print(f"[WARN] Hit 429 -> cooldown {COOLDOWN_ON_429_SEC:.0f}s")
+                time.sleep(COOLDOWN_ON_429_SEC)
             else:
                 consecutive_429 = 0
 
-            # save one sample per route_id
-            if rk not in debug["errors_sample"]:
-                debug["errors_sample"][rk] = {
+            if route_id not in debug["errors_sample"]:
+                debug["errors_sample"][route_id] = {
                     "ctx": {
                         "origin": r.get("origin"),
                         "destination": r.get("destination"),
@@ -698,47 +735,45 @@ def main() -> None:
 
             short = err.get("errors") or err.get("message") or err.get("body") or err
             print(
-                f"[ERR] ({idx}/{len(routes_expanded)}) {r.get('origin')}->{r.get('destination')} "
+                f"[ERR] ({idx}/{len(expanded_routes)}) {r.get('origin')}->{r.get('destination')} "
                 f"{r.get('departure_date')}/{r.get('return_date')} | status={stc} | {str(short)[:240]}"
             )
 
             if consecutive_429 >= MAX_429_BEFORE_ABORT:
-                print(f"[FATAL] Muitos 429 consecutivos ({consecutive_429}). Abortando cedo.")
+                print(f"[FATAL] 429 consecutivo atingiu limite ({consecutive_429}). Abortando cedo (SAFE).")
                 break
 
             continue
 
-        # status < 400
+        # success response
         ok_calls += 1
 
         if not offers:
             empty_ok_calls += 1
             status_counts["200_empty"] = status_counts.get("200_empty", 0) + 1
             print(
-                f"[OK] ({idx}/{len(routes_expanded)}) {r.get('origin')}->{r.get('destination')} "
+                f"[OK] ({idx}/{len(expanded_routes)}) {r.get('origin')}->{r.get('destination')} "
                 f"{r.get('departure_date')}/{r.get('return_date')} | offers: 0"
             )
             continue
 
         offers_saved += len(offers)
 
-        if rk not in debug["offers_sample"]:
-            debug["offers_sample"][rk] = {
+        if route_id not in debug["offers_sample"]:
+            debug["offers_sample"][route_id] = {
                 "count": len(offers),
                 "sample_price": extract_price_total(offers[0]),
                 "sample_carrier": extract_carrier(offers[0]),
             }
 
         print(
-            f"[OK] ({idx}/{len(routes_expanded)}) {r.get('origin')}->{r.get('destination')} "
+            f"[OK] ({idx}/{len(expanded_routes)}) {r.get('origin')}->{r.get('destination')} "
             f"{r.get('departure_date')}/{r.get('return_date')} | offers: {len(offers)}"
         )
 
         for offer in offers:
-            # store for best/alerts
             offers_by_route[route_id].append(OfferMeta(offer=offer, departure_date=r["departure_date"], return_date=r["return_date"]))
 
-            # store in history
             append_history_line(
                 {
                     "run_id": rid,
@@ -759,15 +794,12 @@ def main() -> None:
 
     finished = utc_now_iso()
 
-    # Best & Alerts
+    # Best & Alerts always (even if empty)
     best_by_route, alerts = build_best_and_alerts(rid, routes_base, offers_by_route)
-
     write_json(BEST_FILE, {"run_id": rid, "updated_utc": finished, "by_route": best_by_route})
     write_json(ALERTS_FILE, {"run_id": rid, "updated_utc": finished, "alerts": alerts})
 
-    # final state
-    duration = int((datetime.fromisoformat(started.replace("Z", "+00:00")) - datetime.fromisoformat(started.replace("Z", "+00:00"))).total_seconds())
-    # ^ placeholder; compute safely:
+    # Duration
     try:
         dt_start = datetime.fromisoformat(started.replace("Z", "+00:00"))
         dt_end = datetime.fromisoformat(finished.replace("Z", "+00:00"))
@@ -777,6 +809,7 @@ def main() -> None:
 
     success_rate = (ok_calls / total_calls) if total_calls else 0.0
 
+    # State
     state_payload = {
         "run_id": rid,
         "started_utc": started,
@@ -795,19 +828,23 @@ def main() -> None:
         "immutable_required_dests": IMMUTABLE_REQUIRED_DESTS,
         "expanded_ranges": expanded_ranges,
         "request_sleep_sec": REQUEST_SLEEP_SEC,
+        "cooldown_before_start_sec": COOLDOWN_BEFORE_START_SEC,
+        "cooldown_on_429_sec": COOLDOWN_ON_429_SEC,
         "max_429_before_abort": MAX_429_BEFORE_ABORT,
         "status_counts": status_counts,
+        "safe_mode": SAFE_MODE,
+        "selected_route_id": selected_route_id,
     }
     write_json(STATE_FILE, state_payload)
 
-    # debug file
+    # Debug file
+    debug["finished_utc"] = finished
     debug["status_counts"] = status_counts
     write_json(DEBUG_FILE, debug)
 
-    # summary
-    # pick sample offers from best_by_route
+    # Summary
     sample_lines: List[str] = []
-    for rid_key, bo in best_by_route.items():
+    for _, bo in best_by_route.items():
         if bo.get("price_total") is None:
             continue
         sample_lines.append(
@@ -828,13 +865,10 @@ def main() -> None:
     summary_md.append(f"- empty_ok_calls: `{empty_ok_calls}`")
     summary_md.append(f"- success_rate: `{success_rate:.3f}`")
     summary_md.append(f"- offers_saved: `{offers_saved}`")
-    summary_md.append(f"- store: `default`")
     summary_md.append(f"- max_results: `{MAX_RESULTS}`")
     summary_md.append(f"- amadeus_env: `{AMADEUS_ENV}`")
-    summary_md.append(f"- immutable_required_origins: `{IMMUTABLE_REQUIRED_ORIGINS}`")
-    summary_md.append(f"- immutable_required_dests: `{IMMUTABLE_REQUIRED_DESTS}`")
-    summary_md.append(f"- request_sleep_sec: `{REQUEST_SLEEP_SEC}`")
-    summary_md.append(f"- max_429_before_abort: `{MAX_429_BEFORE_ABORT}`")
+    summary_md.append(f"- safe_mode: `{SAFE_MODE}`")
+    summary_md.append(f"- selected_route_id: `{selected_route_id}`")
     summary_md.append(f"- status_counts: `{status_counts}`")
     summary_md.append("\n## Sample best offers (preview)")
     if sample_lines:
