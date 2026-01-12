@@ -17,9 +17,11 @@ if str(APP_DIR) not in sys.path:
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
-# utilitário (mantemos, mas agora o principal é ler data/history.jsonl)
-from utilitario.history_store import HistoryStore
-from utilitario.analytics import query_events_for_table
+# opcional (mantém compatibilidade com seu projeto, mesmo que não use)
+try:
+    from utilitario.history_store import HistoryStore  # noqa: F401
+except Exception:
+    HistoryStore = None  # type: ignore
 
 st.set_page_config(page_title="Flight Agent", layout="wide")
 st.title("✈️ Flight Agent — Histórico & Insights")
@@ -27,10 +29,10 @@ st.title("✈️ Flight Agent — Histórico & Insights")
 DATA_DIR = Path("data")
 STATE_PATH = DATA_DIR / "state.json"
 HISTORY_PATH = DATA_DIR / "history.jsonl"
-
+ALERTS_PATH = DATA_DIR / "alerts.json"
 
 # -----------------------------
-# Timezone helpers (execuções)
+# Timezone helpers
 # -----------------------------
 try:
     from zoneinfo import ZoneInfo
@@ -38,9 +40,11 @@ except Exception:
     ZoneInfo = None
 
 TZ_SP = ZoneInfo("America/Sao_Paulo") if ZoneInfo else timezone(timedelta(hours=-3))
+
+# Seu cron: 09:15 UTC = 06:15 BRT
 SCHEDULE_HOUR_LOCAL = 6
 SCHEDULE_MIN_LOCAL = 15
-CRON_EXPECTED = "15 9 * * *"  # 09:15 UTC = 06:15 BRT
+CRON_EXPECTED = "15 9 * * *"
 
 
 def parse_iso_any(s: Any) -> Optional[datetime]:
@@ -72,26 +76,25 @@ def next_runs_local(n: int = 7) -> List[datetime]:
 
 
 # -----------------------------
-# Load persisted state/history
+# Load persisted files
 # -----------------------------
-def read_state() -> Dict[str, Any]:
-    if not STATE_PATH.exists():
+def read_json(path: Path) -> Dict[str, Any]:
+    if not path.exists():
         return {}
     try:
-        return json.loads(STATE_PATH.read_text(encoding="utf-8"))
+        return json.loads(path.read_text(encoding="utf-8"))
     except Exception:
         return {}
 
 
-def read_history_jsonl(limit_lines: int = 20000) -> List[Dict[str, Any]]:
-    if not HISTORY_PATH.exists():
+def read_history_jsonl(path: Path, limit_lines: int = 20000) -> List[Dict[str, Any]]:
+    if not path.exists():
         return []
-    rows: List[Dict[str, Any]] = []
     try:
-        # lê as últimas N linhas para não explodir memória
-        lines = HISTORY_PATH.read_text(encoding="utf-8").splitlines()
+        lines = path.read_text(encoding="utf-8").splitlines()
         if len(lines) > limit_lines:
             lines = lines[-limit_lines:]
+        rows: List[Dict[str, Any]] = []
         for ln in lines:
             ln = ln.strip()
             if not ln:
@@ -100,18 +103,16 @@ def read_history_jsonl(limit_lines: int = 20000) -> List[Dict[str, Any]]:
                 rows.append(json.loads(ln))
             except Exception:
                 continue
+        return rows
     except Exception:
         return []
-    return rows
 
 
 def normalize_df(rows: List[Dict[str, Any]]) -> pd.DataFrame:
     if not rows:
         return pd.DataFrame()
-
     df = pd.DataFrame(rows)
 
-    # colunas esperadas
     expected = [
         "ts_utc", "type", "source", "store_name", "route_name",
         "run_id", "origin", "destination",
@@ -141,7 +142,7 @@ def normalize_df(rows: List[Dict[str, Any]]) -> pd.DataFrame:
 
 
 # -----------------------------
-# Sidebar controls
+# Sidebar filters
 # -----------------------------
 st.sidebar.header("Filtros")
 
@@ -158,44 +159,12 @@ children_filter = st.sidebar.selectbox("Crianças", ["(todos)", "0", "1", "2", "
 only_errors = st.sidebar.checkbox("Somente com erro", value=False)
 hide_errors = st.sidebar.checkbox("Ocultar com erro", value=False)
 
-st.sidebar.divider()
-
-# botão opcional (manual) para gravar no store local (não persistente no GitHub automaticamente)
-st.sidebar.subheader("Teste manual (store local)")
-store_name = st.sidebar.text_input("Store (local)", value="default").strip() or "default"
-store = HistoryStore(store_name)
-if st.sidebar.button("Append exemplo local"):
-    store.append(
-        "flight_search",
-        {
-            "run_id": "manual-test",
-            "origin": "CGH",
-            "destination": "CWB",
-            "departure_date": "2026-01-30",
-            "return_date": None,
-            "adults": 2,
-            "children": 1,
-            "cabin": "ECONOMY",
-            "currency": "BRL",
-            "offers_count": 12,
-            "best_price": 399.90,
-            "direct_only": True,
-            "carriers": ["G3"],
-            "carrier_main": "G3",
-            "elapsed_s": 0.0,
-            "error": None,
-        },
-    )
-    st.sidebar.success("Evento local gravado.")
-
-st.sidebar.divider()
-
 # -----------------------------
-# Execuções (state.json + cron)
+# Execuções (state.json)
 # -----------------------------
 st.subheader("🗓️ Execuções do Scheduler")
 
-state = read_state()
+state = read_json(STATE_PATH)
 last_run_utc = parse_iso_any(state.get("last_run_utc"))
 last_success_utc = parse_iso_any(state.get("last_success_utc"))
 last_status = state.get("last_status") or "-"
@@ -206,7 +175,7 @@ c1, c2, c3, c4 = st.columns(4)
 c1.metric("Status", str(last_status))
 c2.metric("Último run (BRT)", last_run_utc.astimezone(TZ_SP).strftime("%Y-%m-%d %H:%M") if last_run_utc else "-")
 c3.metric("Último sucesso (BRT)", last_success_utc.astimezone(TZ_SP).strftime("%Y-%m-%d %H:%M") if last_success_utc else "-")
-c4.metric("Cron", CRON_EXPECTED)
+c4.metric("Cron (UTC)", CRON_EXPECTED)
 
 if last_summary:
     st.caption(f"Resumo: {last_summary}")
@@ -216,31 +185,74 @@ if last_error.strip():
 runs = next_runs_local(7)
 st.dataframe(
     pd.DataFrame(
-        [
-            {
-                "Execução (BRT)": r.strftime("%Y-%m-%d %H:%M"),
-                "Execução (UTC)": r.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M"),
-            }
-            for r in runs
-        ]
+        [{"Execução (BRT)": r.strftime("%Y-%m-%d %H:%M"), "Execução (UTC)": r.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M")} for r in runs]
     ),
     use_container_width=True,
 )
 
+# -----------------------------
+# Alertas (alerts.json)
+# -----------------------------
 st.divider()
+st.subheader("🚨 Alertas")
+
+if not ALERTS_PATH.exists():
+    st.info("Ainda não existe data/alerts.json. Rode o workflow 1x (com scheduler+alerts) para gerar automaticamente.")
+else:
+    alerts_obj = read_json(ALERTS_PATH)
+    generated_utc = alerts_obj.get("generated_utc")
+    triggered_count = alerts_obj.get("triggered_count", 0)
+    alerts_list = alerts_obj.get("alerts", [])
+
+    gen_dt = parse_iso_any(generated_utc)
+    st.caption(
+        f"Gerado em: {gen_dt.astimezone(TZ_SP).strftime('%Y-%m-%d %H:%M')} (BRT)"
+        if gen_dt else f"Gerado em (UTC): {generated_utc or '-'}"
+    )
+
+    if triggered_count:
+        st.error(f"⚠️ {triggered_count} alerta(s) disparado(s)!")
+    else:
+        st.success("✅ Nenhum alerta disparado.")
+
+    if isinstance(alerts_list, list) and alerts_list:
+        df_alerts = pd.DataFrame(alerts_list)
+
+        if "triggered" in df_alerts.columns:
+            triggered = df_alerts[df_alerts["triggered"] == True].copy()
+            all_ = df_alerts.copy()
+        else:
+            triggered = pd.DataFrame()
+            all_ = df_alerts
+
+        if not triggered.empty:
+            st.write("**Disparados**")
+            cols = [c for c in ["name","origin","destination","best_price","threshold","currency","carrier_main","departure_date","return_date","ts_utc","route_name"] if c in triggered.columns]
+            if "best_price" in triggered.columns:
+                triggered = triggered.sort_values("best_price")
+            st.dataframe(triggered[cols], use_container_width=True)
+
+        st.write("**Monitorados (todos)**")
+        cols2 = [c for c in ["name","triggered","origin","destinations","destination","threshold","currency"] if c in all_.columns]
+        st.dataframe(all_[cols2], use_container_width=True)
+    else:
+        st.info("alerts.json existe, mas está vazio (sem alerts configurados ou sem hits).")
 
 # -----------------------------
-# Dados persistidos (history.jsonl)
+# Histórico (history.jsonl)
 # -----------------------------
-rows = read_history_jsonl()
+st.divider()
+st.subheader("📌 Histórico persistido (data/history.jsonl)")
+
+rows = read_history_jsonl(HISTORY_PATH)
 df = normalize_df(rows)
 
-# filtra por janela
+# janela
 if not df.empty and df["ts_utc_dt"].notna().any():
     cutoff = datetime.now(timezone.utc) - timedelta(days=days)
     df = df[df["ts_utc_dt"] >= cutoff]
 
-# aplica filtros
+# filtros
 if not df.empty:
     if route_name:
         df = df[df["route_name"].astype(str).str.contains(route_name, case=False, na=False)]
@@ -261,9 +273,6 @@ if not df.empty:
     if hide_errors:
         df = df[df["has_error"] == False]
 
-# KPIs
-st.subheader("📌 Resumo (histórico persistido)")
-
 k1, k2, k3, k4, k5 = st.columns(5)
 total_events = int(df.shape[0]) if not df.empty else 0
 total_errors = int(df["has_error"].sum()) if not df.empty else 0
@@ -277,7 +286,6 @@ k3.metric("Último evento (BRT)", last_event.astimezone(TZ_SP).strftime("%Y-%m-%
 k4.metric("Ofertas (soma)", f"{offers_sum}")
 k5.metric("Menor preço", "-" if best_seen is None else f"{best_seen:,.2f}")
 
-# Tabela por rota/destino/cia
 st.subheader("💸 Melhor preço por rota / CIA")
 if df.empty or df["best_price"].dropna().empty:
     st.info("Sem preços no período/filtros.")
@@ -290,10 +298,9 @@ else:
     )
     st.dataframe(best, use_container_width=True)
 
-# Eventos recentes
 st.subheader("🧾 Eventos recentes")
 if df.empty:
-    st.info("Sem eventos (verifique se data/history.jsonl existe e está sendo commitado).")
+    st.info("Sem eventos. Verifique se history.jsonl está sendo commitado.")
 else:
     cols = [
         "ts_utc",
@@ -320,14 +327,16 @@ else:
         mime="text/csv",
     )
 
-# Diagnóstico (arquivos)
+# -----------------------------
+# Diagnóstico
+# -----------------------------
 st.divider()
 st.subheader("🔎 Diagnóstico (arquivos persistidos)")
 st.write("state.json existe?", STATE_PATH.exists(), str(STATE_PATH))
 st.write("history.jsonl existe?", HISTORY_PATH.exists(), str(HISTORY_PATH))
+st.write("alerts.json existe?", ALERTS_PATH.exists(), str(ALERTS_PATH))
 if HISTORY_PATH.exists():
     try:
-        size = HISTORY_PATH.stat().st_size
-        st.write("history.jsonl tamanho (bytes):", size)
+        st.write("history.jsonl tamanho (bytes):", HISTORY_PATH.stat().st_size)
     except Exception:
         pass
