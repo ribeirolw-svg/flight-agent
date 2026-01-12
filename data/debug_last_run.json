@@ -1,10 +1,10 @@
 {
-  "run_id": "20260112T200347Z",
-  "ts_utc": "2026-01-12T20:03:47Z",
+  "run_id": "20260112T202109Z",
+  "ts_utc": "2026-01-12T20:21:09Z",
   "env": "test",
-  "max_results": 10,
-  "request_sleep_sec": 0.6,
-  "max_429_before_abort": 3,
+  "max_results": 5,
+  "request_sleep_sec": 2.0,
+  "max_429_before_abort": 1,
   "expanded_ranges": {
     "ROMA_GRU_FCO_2A1C_DIRECT": {
       "min_dep": "2026-09-01",
@@ -48,33 +48,10 @@
           }
         ]
       }
-    },
-    "CWB_CGH_2A1C_DIRECT": {
-      "ctx": {
-        "origin": "CGH",
-        "destination": "CWB",
-        "departure_date": "2026-03-13",
-        "return_date": "2026-03-15",
-        "adults": 2,
-        "children": 1,
-        "direct_only": true
-      },
-      "err": {
-        "_status": 429,
-        "body": "\n                {\n                    \"errors\": [\n                        {\n                            \"code\": 38195,\n                            \"title\": \"Quota limit exceeded\",\n                            \"detail\": \"The quota limit is exceeded\",\n                            \"status\": 429\n                        }\n                    ]\n                }\n            ",
-        "errors": [
-          {
-            "code": 38195,
-            "title": "Quota limit exceeded",
-            "detail": "The quota limit is exceeded",
-            "status": 429
-          }
-        ]
-      }
     }
   },
   "offers_sample": {},
   "status_counts": {
-    "429": 3
+    "429": 1
   }
 }
