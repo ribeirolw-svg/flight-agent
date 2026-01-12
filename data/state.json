@@ -2,15 +2,25 @@
   "store": "default",
   "env": "test",
   "max_results": 10,
+  "routes_file": "routes.yaml",
+  "immutable_required_origins": [
+    "CGH",
+    "GRU"
+  ],
+  "immutable_required_dests": [
+    "CWB",
+    "FCO",
+    "NVT"
+  ],
   "last_run": {
-    "run_id": "20260112T115300Z",
-    "started_utc": "2026-01-12T11:53:00Z",
-    "finished_utc": "2026-01-12T11:53:11Z",
-    "duration_sec": 10,
-    "total_calls": 3,
-    "ok_calls": 3,
+    "run_id": "20260112T133634Z",
+    "started_utc": "2026-01-12T13:36:34Z",
+    "finished_utc": "2026-01-12T13:36:49Z",
+    "duration_sec": 15,
+    "total_calls": 4,
+    "ok_calls": 4,
     "err_calls": 0,
     "success_rate": 1.0,
-    "offers_saved": 24
+    "offers_saved": 34
   }
 }
