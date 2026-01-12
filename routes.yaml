@@ -1,5 +1,5 @@
 routes:
-  # ROMA (imutável) — mas com "sampling" pra não explodir
+  # ROMA (imutável) — agora só 2 pares por execução
   - id: ROMA_GRU_FCO_2A1C_DIRECT
     origin: "GRU"
     destination: "FCO"
@@ -13,15 +13,13 @@ routes:
       trip_days: 15
       start_mm_dd: [9, 1]
       latest_return_mm_dd: [10, 5]
-      # ✅ limita quantos pares consultar por execução
-      max_pairs: 12
-      # ✅ amostra: pega 1 a cada N dias dentro da janela (mantém guardrail)
-      step_days: 2
+      max_pairs: 2
+      step_days: 4
     watch:
       target_price_total: 13000
       max_stops: 0
 
-  # CURITIBA — começa em D+60, mas consulta poucos pares por execução
+  # CURITIBA — começa D+60, 60 dias, mas só 2 pares por execução
   - id: CWB_CGH_2A1C_DIRECT
     origin: "CGH"
     destination: "CWB"
@@ -37,12 +35,12 @@ routes:
       depart_dows: [4, 5]
       return_dows: [6, 0]
       max_trip_len_days: 4
-      max_pairs: 16
+      max_pairs: 2
     watch:
       target_price_total: 800
       max_stops: 0
 
-  # NAVEGANTES — começa em D+60, idem
+  # NAVEGANTES — começa D+60, 60 dias, mas só 2 pares por execução
   - id: NVT_GRU_1A
     origin: "GRU"
     destination: "NVT"
@@ -58,6 +56,6 @@ routes:
       depart_dows: [4, 5]
       return_dows: [6, 0]
       max_trip_len_days: 4
-      max_pairs: 16
+      max_pairs: 2
     watch:
       target_price_total: 350
