@@ -31,8 +31,7 @@ def pick_price(row: Dict[str, Any]) -> Optional[float]:
             continue
         try:
             if isinstance(v, str):
-                v2 = v.strip().replace(",", ".")
-                return float(v2)
+                return float(v.strip().replace(",", "."))
             return float(v)
         except Exception:
             continue
@@ -44,34 +43,35 @@ def normalize_table(rows: List[Dict[str, Any]]) -> pd.DataFrame:
 
     df = pd.DataFrame(rows)
 
-    # Garantir colunas mínimas
+    # Mínimas
     for c in ["ts_utc", "type"]:
         if c not in df.columns:
             df[c] = None
 
-    # Criar preço “best_price” se não existir
-    if "best_price" not in df.columns:
-        df["best_price"] = df.apply(lambda r: pick_price(r.to_dict()), axis=1)
-
-    # Padronizar algumas colunas comuns
-    for c in ["origin", "destination", "currency", "run_id", "offers_count", "direct_only", "error"]:
+    # Colunas úteis esperadas (cria se não existir)
+    for c in [
+        "origin", "destination", "currency", "run_id",
+        "offers_count", "direct_only", "error",
+        "best_price", "adults", "children",
+        "carrier_main", "carriers",
+        "departure_date", "return_date", "cabin",
+    ]:
         if c not in df.columns:
             df[c] = None
 
-    # ofertas_count para numérico
+    # best_price fallback se não existir
+    if df["best_price"].isna().all():
+        df["best_price"] = df.apply(lambda r: pick_price(r.to_dict()), axis=1)
+
+    # Tipos
     df["offers_count"] = pd.to_numeric(df["offers_count"], errors="coerce")
     df["best_price"] = pd.to_numeric(df["best_price"], errors="coerce")
+    df["adults"] = pd.to_numeric(df["adults"], errors="coerce")
+    df["children"] = pd.to_numeric(df["children"], errors="coerce")
 
-    # erro booleano
     df["has_error"] = df["error"].apply(lambda x: bool(x) and str(x).strip().lower() not in ["none", "null", ""])
+    df["route"] = df.apply(lambda r: f"{r.get('origin') or '-'} → {r.get('destination') or '-'}", axis=1)
 
-    # rota
-    df["route"] = df.apply(
-        lambda r: f"{r.get('origin') or '-'} → {r.get('destination') or '-'}",
-        axis=1,
-    )
-
-    # ts_utc parse
     df["ts_utc_dt"] = pd.to_datetime(df["ts_utc"], errors="coerce", utc=True)
     df = df.sort_values("ts_utc_dt", ascending=False)
 
@@ -85,30 +85,43 @@ st.sidebar.header("Filtros")
 store_name = st.sidebar.text_input("Store", value="default").strip() or "default"
 days = st.sidebar.slider("Janela (dias)", 1, 365, 30)
 
-# ✅ ajuste fino: default vazio pra não esconder tudo
+# Default vazio pra não esconder tudo
 type_filter_str = st.sidebar.text_input("Type (vírgula, opcional)", value="").strip()
 type_filter = [t.strip() for t in type_filter_str.split(",") if t.strip()] if type_filter_str else None
 
 origin = st.sidebar.text_input("Origin (ex: CGH)", value="").strip().upper()
 destination = st.sidebar.text_input("Destination (ex: CWB)", value="").strip().upper()
 
+# novos filtros
+adults_filter = st.sidebar.selectbox("Adultos (opcional)", options=["(todos)", "1", "2", "3", "4"], index=0)
+children_filter = st.sidebar.selectbox("Crianças (opcional)", options=["(todos)", "0", "1", "2", "3"], index=0)
+carrier_filter = st.sidebar.text_input("CIA aérea (opcional, ex: G3)", value="").strip().upper()
+
 only_errors = st.sidebar.checkbox("Somente com erro", value=False)
 hide_errors = st.sidebar.checkbox("Ocultar com erro", value=False)
 
 st.sidebar.divider()
 st.sidebar.subheader("Teste manual")
+
 store = HistoryStore(store_name)
-if st.sidebar.button("Append exemplo"):
+if st.sidebar.button("Append exemplo (CGH→CWB)"):
     store.append(
         "flight_search",
         {
             "run_id": "manual-test",
             "origin": "CGH",
             "destination": "CWB",
+            "departure_date": "2026-01-30",
+            "return_date": None,
+            "adults": 2,
+            "children": 1,
+            "cabin": "ECONOMY",
             "currency": "BRL",
             "offers_count": 12,
             "best_price": 399.90,
             "direct_only": True,
+            "carriers": ["G3"],
+            "carrier_main": "G3",
             "error": None,
         },
     )
@@ -125,12 +138,21 @@ rows = query_events_for_table(
 )
 df = normalize_table(rows)
 
-# aplica filtros de rota/erro
+# aplica filtros
 if not df.empty:
     if origin:
         df = df[df["origin"].astype(str).str.upper() == origin]
     if destination:
         df = df[df["destination"].astype(str).str.upper() == destination]
+
+    if adults_filter != "(todos)":
+        df = df[df["adults"].fillna(-1).astype(int) == int(adults_filter)]
+    if children_filter != "(todos)":
+        df = df[df["children"].fillna(-1).astype(int) == int(children_filter)]
+
+    if carrier_filter:
+        df = df[df["carrier_main"].astype(str).str.upper() == carrier_filter]
+
     if only_errors:
         df = df[df["has_error"] == True]
     if hide_errors:
@@ -161,13 +183,13 @@ kpi5.metric("Preço médio", "-" if avg_best_price is None else f"{avg_best_pric
 c1, c2 = st.columns([1, 1], gap="large")
 
 with c1:
-    st.write("**Eventos por type**")
+    st.write("**Eventos por CIA aérea (carrier_main)**")
     if df.empty:
         st.info("Sem dados com os filtros atuais.")
     else:
-        counts = df["type"].value_counts().reset_index()
-        counts.columns = ["type", "count"]
-        st.bar_chart(counts.set_index("type"))
+        counts = df["carrier_main"].fillna("(sem)").value_counts().reset_index()
+        counts.columns = ["carrier_main", "count"]
+        st.bar_chart(counts.set_index("carrier_main"))
 
 with c2:
     st.write("**Eventos por dia**")
@@ -188,17 +210,17 @@ with c2:
 st.divider()
 
 # -----------------------------
-# Melhores preços por rota
+# Melhor preço por rota
 # -----------------------------
 st.subheader("💸 Melhor preço por rota")
 if df.empty:
     st.info("Sem dados.")
 elif df["best_price"].dropna().empty:
-    st.info("Ainda não encontrei campo de preço nos eventos. Use 'Append exemplo' ou rode o scheduler pra gravar.")
+    st.info("Sem best_price ainda (rode o scheduler/search pra gravar).")
 else:
     best = (
         df.dropna(subset=["best_price"])
-          .groupby("route", as_index=False)
+          .groupby(["route", "carrier_main"], as_index=False)
           .agg(best_price=("best_price", "min"), samples=("best_price", "count"))
           .sort_values("best_price")
     )
@@ -207,7 +229,7 @@ else:
 st.divider()
 
 # -----------------------------
-# Tabela principal
+# Tabela limpa
 # -----------------------------
 st.subheader("🧾 Eventos (tabela limpa)")
 if df.empty:
@@ -215,10 +237,15 @@ if df.empty:
 else:
     cols = [
         "ts_utc",
-        "type",
         "run_id",
         "origin",
         "destination",
+        "departure_date",
+        "return_date",
+        "adults",
+        "children",
+        "cabin",
+        "carrier_main",
         "currency",
         "offers_count",
         "best_price",
@@ -226,7 +253,7 @@ else:
         "error",
     ]
     cols = [c for c in cols if c in df.columns]
-    st.dataframe(df[cols].head(1000), use_container_width=True)
+    st.dataframe(df[cols].head(2000), use_container_width=True)
 
     st.download_button(
         "⬇️ Baixar JSONL filtrado",
@@ -235,15 +262,15 @@ else:
         mime="application/json",
     )
 
-# -----------------------------
-# ✅ Diagnóstico rápido (pra saber se tem dado e onde)
-# -----------------------------
 st.divider()
+
+# -----------------------------
+# Diagnóstico (data/jsonl)
+# -----------------------------
 st.subheader("🔎 Diagnóstico rápido (data/jsonl)")
 
 data_dir = Path("data")
 st.write("Diretório data existe?", data_dir.exists())
-
 if data_dir.exists():
     files = sorted([p.name for p in data_dir.glob("*.jsonl")])
     st.write("Arquivos JSONL em /data:", files)
