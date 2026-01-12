@@ -1,40 +1,30 @@
-origin_domestic: CGH
-
-defaults:
-  adults: 2
-  children: 1
-  children_ages: [3]
-  cabin: ECONOMY
-  currency: BRL
-  direct_only: true
-
 routes:
-  - name: Roma
-    origin: GRU
-    destinations: [FCO, CIA]
-    date_rule:
-      type: fixed
-      depart_start: "2026-09-01"
-      depart_end: "2026-09-20"
-      trip_length_days: 15
-      return_deadline: "2026-10-05"
+  - origin: "GRU"
+    destination: "FCO"
+    departure_date: "2026-01-30"
+    return_date: "2026-02-02"
+    adults: 2
+    children: 1
+    cabin: "ECONOMY"
+    currency: "BRL"
+    direct_only: true
 
-  - name: Curitiba
-    domestic: true
-    destinations: [CWB]
-    date_rule:
-      type: rolling_weekend
-      lookahead_days: 30
-      depart_dows: [FRI, SAT]
-      return_dows: [SUN, MON]
+  - origin: "CGH"
+    destination: "CWB"
+    departure_date: "2026-01-30"
+    return_date: "2026-02-02"
+    adults: 2
+    children: 1
+    cabin: "ECONOMY"
+    currency: "BRL"
+    direct_only: true
 
-  - name: Navegantes
-    domestic: true
-    destinations: [NVT]
-    date_rule:
-      type: rolling_weekend
-      lookahead_days: 30
-      depart_dows: [FRI, SAT]
-      return_dows: [SUN, MON]
-
-sources: [amadeus]
+  - origin: "GRU"
+    destination: "MIA"
+    departure_date: "2026-03-10"
+    return_date: "2026-03-20"
+    adults: 1
+    children: 0
+    cabin: "ECONOMY"
+    currency: "BRL"
+    direct_only: false
