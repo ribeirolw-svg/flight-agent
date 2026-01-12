@@ -23,8 +23,8 @@ except Exception:
 # =============================
 # Repo-root safe paths
 # =============================
-# garante que sempre grava em <repo>/data mesmo se o script for chamado de outro cwd
 REPO_ROOT = Path(__file__).resolve().parent
+
 DATA_DIR = REPO_ROOT / "data"
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -215,7 +215,6 @@ def expand_routes(routes_base: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                 expanded.append(rr)
 
         else:
-            # sem datas e sem rule reconhecida
             continue
 
     return expanded
@@ -294,11 +293,6 @@ def amadeus_search_offers(
 # Offer normalization (fix NULL)
 # =============================
 def normalize_offer(offer: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Aceita:
-    - Raw Amadeus: price.grandTotal / validatingAirlineCodes / itineraries.segments
-    - Simplificado: price_total/total_price/price/total, carrier/airline, stops/number_of_stops
-    """
     price = (
         safe_float(offer.get("price_total"))
         or safe_float(offer.get("total_price"))
@@ -340,12 +334,30 @@ def normalize_offer(offer: Dict[str, Any]) -> Dict[str, Any]:
 
 
 # =============================
-# Best/Alerts
+# Best/Alerts persistence
 # =============================
 def load_prev_best() -> Dict[str, Any]:
+    """
+    FIX CRÍTICO:
+    best_offers.json pode estar vazio/corrompido (commit anterior, edição manual, etc).
+    Neste caso, NÃO quebra o workflow: volta vazio e segue.
+    """
     if not BEST_FILE.exists():
         return {"by_route": {}}
-    return json.loads(BEST_FILE.read_text(encoding="utf-8"))
+
+    try:
+        txt = BEST_FILE.read_text(encoding="utf-8").strip()
+        if not txt:
+            return {"by_route": {}}
+        data = json.loads(txt)
+        if not isinstance(data, dict):
+            return {"by_route": {}}
+        if "by_route" not in data or not isinstance(data.get("by_route"), dict):
+            data["by_route"] = {}
+        return data
+    except Exception as e:
+        print(f"[WARN] best_offers.json inválido ({e}). Resetando histórico de best.")
+        return {"by_route": {}}
 
 
 def save_best(run_id: str, best_by_route: Dict[str, Any]) -> None:
@@ -572,7 +584,6 @@ def main() -> None:
         offers_saved += len(data)
         print(f"[OK] ({idx}/{total_calls}) {origin}->{dest} {dep}/{ret} | offers: {len(data)}")
 
-        # acumula candidatos para best por ID
         for offer in data:
             offers_by_route[rk].append({"offer": offer, "departure_date": dep, "return_date": ret})
 
@@ -595,10 +606,8 @@ def main() -> None:
                 }
             )
 
-    # best + alerts (por rota base/id)
     best_by_route, alerts = build_best_and_alerts(rid, routes_base, offers_by_route)
 
-    # >>> garante que os arquivos sempre existam
     print(f"[INFO] Writing best offers: {BEST_FILE}")
     save_best(rid, best_by_route)
     print(f"[INFO] Writing alerts:     {ALERTS_FILE}")
