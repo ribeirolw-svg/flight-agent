@@ -1,457 +1,396 @@
+#!/usr/bin/env python3
 from __future__ import annotations
 
 import json
 import os
 import sys
+import time
+import traceback
+from collections import Counter
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import yaml
 
-# ------------------------------------------------------------
-# PATHS (repo root + app for utilitario)
-# ------------------------------------------------------------
-ROOT_DIR = Path(__file__).resolve().parent
-APP_DIR = ROOT_DIR / "app"
-if str(ROOT_DIR) not in sys.path:
-    sys.path.insert(0, str(ROOT_DIR))
-if str(APP_DIR) not in sys.path:
-    sys.path.insert(0, str(APP_DIR))
+# =========================
+# Config / Env
+# =========================
+DATA_DIR = Path(os.getenv("DATA_DIR", "data"))
+ROUTES_FILE = os.getenv("ROUTES_FILE", "routes.yaml")
+ALERTS_FILE = os.getenv("ALERTS_FILE", "alerts.yaml")  # mantido p/ compatibilidade
+STORE_NAME = os.getenv("STORE_NAME", "default")
+MAX_RESULTS = int(os.getenv("AMADEUS_MAX_RESULTS", "10"))
+AMADEUS_ENV = os.getenv("AMADEUS_ENV", "").strip().lower() or "test"  # evita vazio
 
-from search import run_search_and_store  # noqa: E402
-
-
-# ------------------------------------------------------------
-# State.json helpers
-# ------------------------------------------------------------
-def _utc_now_iso() -> str:
-    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
-
-
-def _read_json(path: Path) -> Dict[str, Any]:
-    if not path.exists():
-        return {}
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
-        return {}
+# =========================
+# Paths (artefatos)
+# =========================
+HISTORY_PATH = DATA_DIR / "history.jsonl"
+STATE_PATH = DATA_DIR / "state.json"
+ALERTS_PATH = DATA_DIR / "alerts.json"
+SUMMARY_MD_PATH = DATA_DIR / "summary.md"
+RUNS_DIR = DATA_DIR / "runs"
 
 
-def _write_json(path: Path, obj: Dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
+# =========================
+# Helpers
+# =========================
+def utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def iso_z(dt: datetime) -> str:
+    # ISO-8601 com Z
+    return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def run_id_from_dt(dt: datetime) -> str:
+    # Ex.: 20260112T095849Z
+    return dt.astimezone(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+
+
+def ensure_dirs() -> None:
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    RUNS_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def load_yaml_file(path: str) -> Dict[str, Any]:
+    with open(path, "r", encoding="utf-8") as f:
+        return yaml.safe_load(f) or {}
+
+
+def append_jsonl(path: Path, obj: Dict[str, Any]) -> None:
+    with path.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(obj, ensure_ascii=False) + "\n")
+
+
+def write_json(path: Path, obj: Dict[str, Any]) -> None:
     path.write_text(json.dumps(obj, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
-def update_state(data_dir: str, patch: Dict[str, Any]) -> Dict[str, Any]:
-    p = Path(data_dir) / "state.json"
-    cur = _read_json(p)
-    cur.update(patch)
-    _write_json(p, cur)
-    return cur
+def write_text(path: Path, txt: str) -> None:
+    path.write_text(txt, encoding="utf-8")
 
 
-def mark_run_start(data_dir: str) -> None:
-    update_state(data_dir, {"last_run_utc": _utc_now_iso(), "last_status": "running", "last_error": ""})
+def safe_str(e: BaseException) -> str:
+    return f"{type(e).__name__}: {e}"
 
 
-def mark_run_success(data_dir: str, summary: str) -> None:
-    update_state(
-        data_dir,
-        {"last_success_utc": _utc_now_iso(), "last_status": "success", "last_error": "", "last_summary": summary},
-    )
-
-
-def mark_run_error(data_dir: str, err: str) -> None:
-    update_state(data_dir, {"last_status": "error", "last_error": (err or "").strip()})
-
-
-# ------------------------------------------------------------
-# Date helpers
-# ------------------------------------------------------------
-DOW_MAP = {"MON": 0, "TUE": 1, "WED": 2, "THU": 3, "FRI": 4, "SAT": 5, "SUN": 6}
-
-
-def normalize_date(s: Optional[str]) -> Optional[str]:
-    if not s:
-        return None
-    s = str(s).strip()
-    if not s:
-        return None
-    fmts = ["%Y-%m-%d", "%d-%m-%Y", "%Y/%m/%d", "%d/%m/%Y"]
-    for fmt in fmts:
-        try:
-            dt = datetime.strptime(s, fmt)
-            return dt.strftime("%Y-%m-%d")
-        except Exception:
-            pass
-    return s
-
-
-def parse_ymd(s: str) -> date:
-    return datetime.strptime(s, "%Y-%m-%d").date()
-
-
-def daterange(d0: date, d1: date) -> Iterable[date]:
-    cur = d0
-    while cur <= d1:
-        yield cur
-        cur += timedelta(days=1)
-
-
-def next_date_with_dow(start: date, allowed_dows: List[int], max_ahead_days: int = 10) -> Optional[date]:
-    for i in range(1, max_ahead_days + 1):
-        d = start + timedelta(days=i)
-        if d.weekday() in allowed_dows:
-            return d
-    return None
-
-
-def generate_date_pairs_fixed(rule: Dict[str, Any]) -> List[Tuple[str, str]]:
-    depart_start = parse_ymd(normalize_date(rule["depart_start"]) or rule["depart_start"])
-    depart_end = parse_ymd(normalize_date(rule["depart_end"]) or rule["depart_end"])
-    trip_len = int(rule.get("trip_length_days", 7))
-    return_deadline = parse_ymd(normalize_date(rule["return_deadline"]) or rule["return_deadline"])
-
-    pairs: List[Tuple[str, str]] = []
-    step = int(rule.get("depart_step_days", 3))
-
-    cur = depart_start
-    while cur <= depart_end:
-        ret = cur + timedelta(days=trip_len)
-        if ret <= return_deadline:
-            pairs.append((cur.strftime("%Y-%m-%d"), ret.strftime("%Y-%m-%d")))
-        cur += timedelta(days=step)
-
-    if not pairs:
-        cur = depart_start
-        ret = min(cur + timedelta(days=trip_len), return_deadline)
-        pairs.append((cur.strftime("%Y-%m-%d"), ret.strftime("%Y-%m-%d")))
-    return pairs
-
-
-def generate_date_pairs_rolling_weekend(rule: Dict[str, Any]) -> List[Tuple[str, str]]:
-    lookahead_days = int(rule.get("lookahead_days", 30))
-    depart_dows = [DOW_MAP[x.upper()] for x in rule.get("depart_dows", ["FRI", "SAT"])]
-    return_dows = [DOW_MAP[x.upper()] for x in rule.get("return_dows", ["SUN", "MON"])]
-
-    today = datetime.now().date()
-    end = today + timedelta(days=lookahead_days)
-
-    pairs: List[Tuple[str, str]] = []
-    for d in daterange(today, end):
-        if d.weekday() not in depart_dows:
-            continue
-        ret = next_date_with_dow(d, return_dows, max_ahead_days=10)
-        if ret:
-            pairs.append((d.strftime("%Y-%m-%d"), ret.strftime("%Y-%m-%d")))
-
-    max_pairs = int(rule.get("max_pairs", 6))
-    return pairs[:max_pairs]
-
-
-def generate_date_pairs(rule: Dict[str, Any]) -> List[Tuple[str, str]]:
-    t = str(rule.get("type", "")).strip().lower()
-    if t == "fixed":
-        return generate_date_pairs_fixed(rule)
-    if t == "rolling_weekend":
-        return generate_date_pairs_rolling_weekend(rule)
-    return []
-
-
-# ------------------------------------------------------------
-# History.jsonl writer
-# ------------------------------------------------------------
-def append_history_jsonl(data_dir: str, event: Dict[str, Any]) -> None:
-    p = Path(data_dir) / "history.jsonl"
-    p.parent.mkdir(parents=True, exist_ok=True)
-
-    event = dict(event)
-    event.setdefault("ts_utc", _utc_now_iso())
-    event.setdefault("type", "flight_search")
-
-    with p.open("a", encoding="utf-8") as f:
-        f.write(json.dumps(event, ensure_ascii=False) + "\n")
-
-
-def read_history_jsonl(data_dir: str, limit_lines: int = 50000) -> List[Dict[str, Any]]:
-    p = Path(data_dir) / "history.jsonl"
-    if not p.exists():
-        return []
-    try:
-        lines = p.read_text(encoding="utf-8").splitlines()
-        if len(lines) > limit_lines:
-            lines = lines[-limit_lines:]
-        out: List[Dict[str, Any]] = []
-        for ln in lines:
-            ln = ln.strip()
-            if not ln:
-                continue
-            try:
-                out.append(json.loads(ln))
-            except Exception:
-                continue
-        return out
-    except Exception:
-        return []
-
-
-# ------------------------------------------------------------
-# Alerts
-# ------------------------------------------------------------
-def load_alerts_config(path: str) -> List[Dict[str, Any]]:
-    p = Path(path)
-    if not p.exists():
-        return []
-    try:
-        cfg = yaml.safe_load(p.read_text(encoding="utf-8")) or {}
-        alerts = cfg.get("alerts", []) or []
-        if isinstance(alerts, list):
-            return [a for a in alerts if isinstance(a, dict)]
-        return []
-    except Exception:
-        return []
-
-
-def build_alerts(
-    history_rows: List[Dict[str, Any]],
-    alerts_cfg: List[Dict[str, Any]],
-) -> Dict[str, Any]:
+def extract_error_code(message: str) -> str:
     """
-    Encontra "hits" onde best_price <= max_best_price
-    considerando origin + destination list + currency (opcional).
-    Pega o melhor (menor preço) por alerta.
+    Heurística simples: tenta mapear os erros mais comuns sem depender do requests.
     """
-    now_utc = _utc_now_iso()
-    hits: List[Dict[str, Any]] = []
-
-    # index rápido: filtra apenas eventos sem erro e com preço
-    clean = []
-    for r in history_rows:
-        if r.get("error"):
-            continue
-        bp = r.get("best_price")
-        try:
-            bp = float(bp) if bp is not None else None
-        except Exception:
-            bp = None
-        if bp is None:
-            continue
-        clean.append((r, bp))
-
-    for a in alerts_cfg:
-        name = str(a.get("name", "alert")).strip()
-        origin = str(a.get("origin", "")).strip().upper()
-        dests = [str(x).strip().upper() for x in (a.get("destinations", []) or [])]
-        max_price = a.get("max_best_price")
-        currency = str(a.get("currency", "")).strip().upper() if a.get("currency") else None
-
-        try:
-            max_price_f = float(max_price)
-        except Exception:
-            continue
-
-        best_match: Optional[Tuple[Dict[str, Any], float]] = None
-
-        for r, bp in clean:
-            if origin and str(r.get("origin", "")).strip().upper() != origin:
-                continue
-            if dests and str(r.get("destination", "")).strip().upper() not in dests:
-                continue
-            if currency:
-                cur = str(r.get("currency", "")).strip().upper()
-                if cur != currency:
-                    continue
-            if bp <= max_price_f:
-                if best_match is None or bp < best_match[1]:
-                    best_match = (r, bp)
-
-        if best_match:
-            r, bp = best_match
-            hits.append(
-                {
-                    "name": name,
-                    "triggered": True,
-                    "threshold": max_price_f,
-                    "currency": currency or r.get("currency"),
-                    "origin": r.get("origin"),
-                    "destination": r.get("destination"),
-                    "departure_date": r.get("departure_date"),
-                    "return_date": r.get("return_date"),
-                    "best_price": bp,
-                    "carrier_main": r.get("carrier_main"),
-                    "offers_count": r.get("offers_count"),
-                    "ts_utc": r.get("ts_utc"),
-                    "route_name": r.get("route_name"),
-                }
-            )
-        else:
-            hits.append(
-                {
-                    "name": name,
-                    "triggered": False,
-                    "threshold": max_price_f,
-                    "currency": currency or "",
-                    "origin": origin,
-                    "destinations": dests,
-                }
-            )
-
-    triggered = [h for h in hits if h.get("triggered") is True]
-    return {
-        "generated_utc": now_utc,
-        "triggered_count": len(triggered),
-        "alerts": hits,
-    }
+    m = message.lower()
+    if "401" in m or "unauthorized" in m or "invalid_client" in m:
+        return "HTTP_401"
+    if "403" in m or "forbidden" in m:
+        return "HTTP_403"
+    if "404" in m:
+        return "HTTP_404"
+    if "408" in m or "timeout" in m:
+        return "TIMEOUT"
+    if "429" in m or "too many requests" in m:
+        return "HTTP_429"
+    if "500" in m:
+        return "HTTP_500"
+    if "502" in m:
+        return "HTTP_502"
+    if "503" in m:
+        return "HTTP_503"
+    if "504" in m:
+        return "HTTP_504"
+    if "no offers" in m or "no_offers" in m:
+        return "NO_OFFERS"
+    return "ERR_UNKNOWN"
 
 
-def write_alerts(data_dir: str, alerts_obj: Dict[str, Any]) -> None:
-    p = Path(data_dir) / "alerts.json"
-    p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(json.dumps(alerts_obj, ensure_ascii=False, indent=2), encoding="utf-8")
+def summarize_offer_for_log(offer: Dict[str, Any]) -> str:
+    """
+    Tentativa de criar uma linha curta (não quebra se o formato variar).
+    """
+    # Preço
+    price = ""
+    try:
+        price = str(offer.get("price", {}).get("total") or offer.get("price", {}).get("grandTotal") or "")
+    except Exception:
+        price = ""
+    # Moeda (às vezes price.currency)
+    currency = ""
+    try:
+        currency = str(offer.get("price", {}).get("currency") or "")
+    except Exception:
+        currency = ""
+
+    # Carrier (depende do formato)
+    carrier = ""
+    try:
+        # Alguns retornos têm "validatingAirlineCodes": ["LA"]
+        vac = offer.get("validatingAirlineCodes")
+        if isinstance(vac, list) and vac:
+            carrier = str(vac[0])
+    except Exception:
+        carrier = ""
+
+    # Stops / segments
+    stops = ""
+    try:
+        itins = offer.get("itineraries")
+        if isinstance(itins, list) and itins:
+            segs = itins[0].get("segments", [])
+            if isinstance(segs, list) and len(segs) > 0:
+                # stops = segmentos - 1
+                stops = f"{max(len(segs)-1, 0)} stop(s)"
+    except Exception:
+        stops = ""
+
+    bits = [b for b in [carrier, (f"{currency} {price}".strip()), stops] if b]
+    return " | ".join(bits) if bits else "offer"
 
 
-# ------------------------------------------------------------
-# Core scheduler
-# ------------------------------------------------------------
+# =========================
+# Core Search Integration
+# =========================
+def import_search_callable():
+    """
+    Espera existir search.py com a função:
+      search_offers_for_route(route: dict, *, max_results: int, env: str) -> list[dict]
+    Se o teu search tiver outro nome, me fala que eu ajusto, mas isso aqui já cobre o padrão.
+    """
+    try:
+        import search  # type: ignore
+    except Exception as e:
+        raise RuntimeError(
+            "Não consegui importar 'search.py'. Garanta que existe search.py na raiz."
+        ) from e
+
+    fn = getattr(search, "search_offers_for_route", None)
+    if not callable(fn):
+        raise RuntimeError(
+            "Em search.py, esperava uma função 'search_offers_for_route(route, *, max_results, env)'. "
+            "Se seu search usa outro nome/assinatura, cola aqui que eu ajusto."
+        )
+    return fn
+
+
+# =========================
+# Scheduler
+# =========================
 @dataclass
-class RunStats:
-    total_calls: int = 0
-    ok_calls: int = 0
-    err_calls: int = 0
-
-    def add(self, ok: bool) -> None:
-        self.total_calls += 1
-        if ok:
-            self.ok_calls += 1
-        else:
-            self.err_calls += 1
-
-
-def load_routes_config(path: str) -> Dict[str, Any]:
-    p = Path(path)
-    if not p.exists():
-        raise FileNotFoundError(f"routes config not found: {path}")
-    return yaml.safe_load(p.read_text(encoding="utf-8"))
+class CallResult:
+    ok: bool
+    offers_count: int = 0
+    err_code: Optional[str] = None
+    err_msg: Optional[str] = None
 
 
 def main() -> None:
-    data_dir = os.environ.get("DATA_DIR", "data")
-    routes_file = os.environ.get("ROUTES_FILE", "routes.yaml")
-    alerts_file = os.environ.get("ALERTS_FILE", "alerts.yaml")
-    store_name = os.environ.get("STORE_NAME", "default").strip() or "default"
+    ensure_dirs()
 
-    mark_run_start(data_dir)
+    started_dt = utc_now()
+    started_utc = iso_z(started_dt)
+    rid = run_id_from_dt(started_dt)
 
-    stats = RunStats()
-    started_utc = _utc_now_iso()
+    # stats
+    total_calls = 0
+    ok_calls = 0
+    err_calls = 0
+    offers_saved = 0
+    errors: List[Dict[str, Any]] = []
+    sample_offers: List[str] = []
 
+    # load routes
     try:
-        cfg = load_routes_config(routes_file)
+        routes_cfg = load_yaml_file(ROUTES_FILE)
+    except Exception as e:
+        print(f"[FATAL] Falha ao ler {ROUTES_FILE}: {safe_str(e)}")
+        sys.exit(1)
 
-        defaults = cfg.get("defaults", {}) or {}
-        adults = int(os.environ.get("ADULTS", defaults.get("adults", 1)))
-        children = int(os.environ.get("CHILDREN", defaults.get("children", 0)))
-        cabin = str(os.environ.get("CABIN", defaults.get("cabin", "ECONOMY"))).strip().upper()
-        currency = str(os.environ.get("CURRENCY", defaults.get("currency", "BRL"))).strip().upper()
-        direct_only = str(os.environ.get("DIRECT_ONLY", defaults.get("direct_only", True))).strip().lower() in [
-            "1",
-            "true",
-            "yes",
-            "y",
-        ]
-        max_results = int(os.environ.get("AMADEUS_MAX_RESULTS", "10"))
+    routes = routes_cfg.get("routes") if isinstance(routes_cfg, dict) else None
+    if not isinstance(routes, list) or not routes:
+        print(f"[FATAL] Nenhuma rota encontrada em {ROUTES_FILE}. Esperava chave 'routes:'.")
+        sys.exit(1)
 
-        client_id = os.environ.get("AMADEUS_CLIENT_ID", "").strip()
-        client_secret = os.environ.get("AMADEUS_CLIENT_SECRET", "").strip()
-        if not client_id or not client_secret:
-            raise RuntimeError("Missing AMADEUS_CLIENT_ID / AMADEUS_CLIENT_SECRET (secrets/env)")
+    # import search callable
+    try:
+        search_fn = import_search_callable()
+    except Exception as e:
+        print(f"[FATAL] {safe_str(e)}")
+        sys.exit(1)
 
-        origin_domestic = str(cfg.get("origin_domestic", "CGH")).strip().upper()
+    print(f"[INFO] Run: {rid}")
+    print(f"[INFO] Store: {STORE_NAME} | Env: {AMADEUS_ENV} | Max results: {MAX_RESULTS}")
+    print(f"[INFO] Routes: {len(routes)} | Routes file: {ROUTES_FILE}")
 
-        routes = cfg.get("routes", []) or []
-        if not routes:
-            raise RuntimeError("No routes found in routes.yaml")
+    # execute
+    for i, route in enumerate(routes, start=1):
+        total_calls += 1
 
-        for route in routes:
-            route_name = str(route.get("name", "route")).strip()
-            domestic = bool(route.get("domestic", False))
+        # enrich route meta
+        route_meta = {
+            "idx": i,
+            "origin": route.get("origin"),
+            "destination": route.get("destination"),
+            "departure_date": route.get("departure_date"),
+            "return_date": route.get("return_date"),
+            "adults": route.get("adults"),
+            "children": route.get("children"),
+            "cabin": route.get("cabin"),
+            "currency": route.get("currency"),
+            "direct_only": route.get("direct_only"),
+        }
 
-            origin = str(route.get("origin", origin_domestic if domestic else "")).strip().upper()
-            if not origin:
-                raise RuntimeError(f"Route '{route_name}' missing origin")
+        try:
+            offers = search_fn(route, max_results=MAX_RESULTS, env=AMADEUS_ENV)  # type: ignore
+            if not isinstance(offers, list):
+                raise RuntimeError(f"search_fn retornou tipo inválido: {type(offers)}")
 
-            destinations: List[str] = [str(x).strip().upper() for x in (route.get("destinations", []) or [])]
-            if not destinations:
-                continue
+            ok_calls += 1
+            offers_count = len(offers)
 
-            rule = route.get("date_rule", {}) or {}
-            pairs = generate_date_pairs(rule)
-            if not pairs:
-                continue
+            # persist offers as jsonl
+            for off in offers:
+                if not isinstance(off, dict):
+                    continue
+                record = {
+                    "run_id": rid,
+                    "ts_utc": started_utc,
+                    **route_meta,
+                    "offer": off,
+                }
+                append_jsonl(HISTORY_PATH, record)
+                offers_saved += 1
 
-            for dest in destinations:
-                for depart_date, return_date in pairs:
-                    result = run_search_and_store(
-                        store_name=store_name,
-                        client_id=client_id,
-                        client_secret=client_secret,
-                        origin=origin,
-                        destination=dest,
-                        departure_date=depart_date,
-                        return_date=return_date,
-                        adults=adults,
-                        children=children,
-                        cabin=cabin,
-                        currency=currency,
-                        direct_only=direct_only,
-                        max_results=max_results,
-                        save_raw=False,
+                # collect small samples for log (max 3)
+                if len(sample_offers) < 3:
+                    sample_offers.append(
+                        f"{route_meta.get('origin')}->{route_meta.get('destination')} "
+                        f"{route_meta.get('departure_date')}/{route_meta.get('return_date')} | "
+                        f"{summarize_offer_for_log(off)}"
                     )
 
-                    ok = not bool(result.get("error"))
-                    stats.add(ok)
+            print(f"[OK] ({i}/{len(routes)}) {route_meta.get('origin')}->{route_meta.get('destination')} "
+                  f"{route_meta.get('departure_date')}/{route_meta.get('return_date')} | offers: {offers_count}")
 
-                    event = dict(result)
-                    event["route_name"] = route_name
-                    event["store_name"] = store_name
-                    event["source"] = "amadeus"
-                    append_history_jsonl(data_dir, event)
+        except Exception as e:
+            err_calls += 1
+            msg = safe_str(e)
+            code = extract_error_code(msg)
 
-        # summary.md
-        summary = (
-            f"# Flight Agent — Update Summary\n\n"
-            f"- started_utc: `{started_utc}`\n"
-            f"- finished_utc: `{_utc_now_iso()}`\n"
-            f"- total_calls: `{stats.total_calls}`\n"
-            f"- ok_calls: `{stats.ok_calls}`\n"
-            f"- err_calls: `{stats.err_calls}`\n"
-            f"- store: `{store_name}`\n"
-            f"- max_results: `{max_results}`\n"
-        )
-        Path(data_dir).mkdir(parents=True, exist_ok=True)
-        (Path(data_dir) / "summary.md").write_text(summary, encoding="utf-8")
+            errors.append({
+                "run_id": rid,
+                "route": route_meta,
+                "code": code,
+                "message": msg,
+            })
 
-        # ---- ALERTS (novo)
-        alerts_cfg = load_alerts_config(alerts_file)
-        history_rows = read_history_jsonl(data_dir)
-        alerts_obj = build_alerts(history_rows, alerts_cfg)
-        write_alerts(data_dir, alerts_obj)
+            # log curto, stack em run file
+            print(f"[ERR] ({i}/{len(routes)}) {route_meta.get('origin')}->{route_meta.get('destination')} "
+                  f"{route_meta.get('departure_date')}/{route_meta.get('return_date')} | {code} | {msg}")
 
-        mark_run_success(
-            data_dir,
-            summary=f"calls={stats.total_calls} ok={stats.ok_calls} err={stats.err_calls} alerts={alerts_obj.get('triggered_count', 0)}",
-        )
+            # segue para próxima rota (não explode run inteira)
+            continue
 
-    except Exception as e:
-        mark_run_error(data_dir, str(e))
-        Path(data_dir).mkdir(parents=True, exist_ok=True)
-        (Path(data_dir) / "summary.md").write_text(
-            f"# Flight Agent — Update Summary (ERROR)\n\n- finished_utc: `{_utc_now_iso()}`\n- error: `{str(e)}`\n",
-            encoding="utf-8",
-        )
-        raise
+    finished_dt = utc_now()
+    finished_utc = iso_z(finished_dt)
+    duration_sec = int((finished_dt - started_dt).total_seconds())
+    success_rate = (ok_calls / total_calls) if total_calls else 0.0
+
+    # top errors
+    top_errors = Counter([e.get("code", "ERR_UNKNOWN") for e in errors])
+
+    # state.json (compacto)
+    state = {
+        "store": STORE_NAME,
+        "env": AMADEUS_ENV,
+        "max_results": MAX_RESULTS,
+        "last_run": {
+            "run_id": rid,
+            "started_utc": started_utc,
+            "finished_utc": finished_utc,
+            "duration_sec": duration_sec,
+            "total_calls": total_calls,
+            "ok_calls": ok_calls,
+            "err_calls": err_calls,
+            "success_rate": round(success_rate, 4),
+            "offers_saved": offers_saved,
+        },
+    }
+    write_json(STATE_PATH, state)
+
+    # alerts.json (placeholder seguro — mantém compatibilidade)
+    # (Na Etapa 1 a gente implementa o engine real.)
+    if not ALERTS_PATH.exists():
+        write_json(ALERTS_PATH, {"alerts": [], "generated_utc": finished_utc})
+
+    # run log detalhado
+    run_log = {
+        "run_id": rid,
+        "started_utc": started_utc,
+        "finished_utc": finished_utc,
+        "duration_sec": duration_sec,
+        "store": STORE_NAME,
+        "env": AMADEUS_ENV,
+        "max_results": MAX_RESULTS,
+        "total_calls": total_calls,
+        "ok_calls": ok_calls,
+        "err_calls": err_calls,
+        "success_rate": success_rate,
+        "offers_saved": offers_saved,
+        "routes_count": len(routes),
+        "top_errors": dict(top_errors),
+        "errors": errors,
+        "samples": sample_offers,
+        "traceback_hint": "Veja 'errors' para mensagens. Stacktrace completo não é persistido por segurança; se quiser, eu adiciono.",
+    }
+    write_json(RUNS_DIR / f"{rid}.json", run_log)
+
+    # summary.md (mantém teu formato e adiciona campos úteis)
+    summary_lines = [
+        "# Flight Agent — Update Summary",
+        "",
+        f"- started_utc: `{started_utc}`",
+        f"- finished_utc: `{finished_utc}`",
+        f"- duration_sec: `{duration_sec}`",
+        f"- total_calls: `{total_calls}`",
+        f"- ok_calls: `{ok_calls}`",
+        f"- err_calls: `{err_calls}`",
+        f"- success_rate: `{success_rate:.3f}`",
+        f"- offers_saved: `{offers_saved}`",
+        f"- store: `{STORE_NAME}`",
+        f"- max_results: `{MAX_RESULTS}`",
+        f"- amadeus_env: `{AMADEUS_ENV}`",
+        "",
+    ]
+
+    if top_errors:
+        summary_lines.append("## Top errors")
+        for code, n in top_errors.most_common(10):
+            summary_lines.append(f"- {code}: {n}")
+        summary_lines.append("")
+
+    if sample_offers:
+        summary_lines.append("## Sample offers (preview)")
+        for s in sample_offers[:3]:
+            summary_lines.append(f"- {s}")
+        summary_lines.append("")
+
+    write_text(SUMMARY_MD_PATH, "\n".join(summary_lines).rstrip() + "\n")
+
+    # stdout summary (visível no Actions)
+    print("\n" + "\n".join(summary_lines).rstrip())
+
+    # ============
+    # Anti "GREEN mentiroso"
+    # ============
+    if err_calls > 0 or ok_calls == 0 or offers_saved == 0:
+        print("\n[FAIL] Run completed with issues (green mentiroso guard enabled).")
+        print(f"[FAIL] err_calls={err_calls}, ok_calls={ok_calls}, offers_saved={offers_saved}")
+        sys.exit(2)
+
+    print("\n[OK] Run completed successfully.")
+    sys.exit(0)
 
 
 if __name__ == "__main__":
