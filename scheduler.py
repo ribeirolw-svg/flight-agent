@@ -1,4 +1,3 @@
-# scheduler.py
 from __future__ import annotations
 
 import json
@@ -9,11 +8,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import requests
-
-try:
-    import yaml  # type: ignore
-except Exception as e:
-    raise RuntimeError("PyYAML é necessário para ler routes.yaml. Instale com `pip install pyyaml`.") from e
+import yaml
 
 try:
     from zoneinfo import ZoneInfo
@@ -21,9 +16,6 @@ except Exception:
     ZoneInfo = None  # pragma: no cover
 
 
-# =============================
-# Paths
-# =============================
 REPO_ROOT = Path(__file__).resolve().parent
 DATA_DIR = REPO_ROOT / "data"
 DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -38,15 +30,23 @@ ALERTS_FILE = DATA_DIR / "alerts.json"
 DEBUG_FILE = DATA_DIR / "debug_last_run.json"
 
 TZ_NAME = "America/Sao_Paulo"
-DEFAULT_MAX_RESULTS = int(os.getenv("MAX_RESULTS", "10"))
 
 AMADEUS_TEST_BASE = "https://test.api.amadeus.com"
 AMADEUS_PROD_BASE = "https://api.amadeus.com"
 
+DEFAULT_MAX_RESULTS = int(os.getenv("MAX_RESULTS", "10"))
 
-# =============================
-# Helpers
-# =============================
+# ✅ throttling (ajustável por env)
+REQUEST_SLEEP_SEC = float(os.getenv("REQUEST_SLEEP_SEC", "0.35"))
+
+# ✅ se começar a dar 429 em sequência, aborta cedo
+MAX_429_BEFORE_ABORT = int(os.getenv("MAX_429_BEFORE_ABORT", "6"))
+
+
+IMMUTABLE_REQUIRED_ORIGINS = ["CGH", "GRU"]
+IMMUTABLE_REQUIRED_DESTS = ["CWB", "FCO", "NVT"]
+
+
 def utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -82,21 +82,11 @@ def safe_float(x: Any) -> Optional[float]:
 
 
 def load_config() -> Dict[str, Any]:
-    if not ROUTES_FILE.exists():
-        raise FileNotFoundError(f"routes.yaml não encontrado em: {ROUTES_FILE}")
     return yaml.safe_load(ROUTES_FILE.read_text(encoding="utf-8")) or {}
 
 
 def route_key(route: Dict[str, Any]) -> str:
-    rid = route.get("id")
-    return str(rid) if rid else f'{route.get("origin","")}-{route.get("destination","")}'
-
-
-# =============================
-# Immutable validation
-# =============================
-IMMUTABLE_REQUIRED_ORIGINS = ["CGH", "GRU"]
-IMMUTABLE_REQUIRED_DESTS = ["CWB", "FCO", "NVT"]
+    return str(route.get("id") or f'{route.get("origin","")}-{route.get("destination","")}')
 
 
 def validate_immutable_rules(routes_expanded: List[Dict[str, Any]]) -> None:
@@ -115,9 +105,6 @@ def validate_immutable_rules(routes_expanded: List[Dict[str, Any]]) -> None:
         raise SystemExit(1)
 
 
-# =============================
-# Date rules
-# =============================
 def generate_rome_pairs(
     year: int,
     start_mm_dd: Tuple[int, int],
@@ -158,10 +145,24 @@ def generate_weekend_pairs(
     return sorted(pairs)
 
 
+def sample_pairs(pairs: List[Tuple[date, date]], step_days: int, max_pairs: int) -> List[Tuple[date, date]]:
+    if not pairs:
+        return []
+    # pega 1 a cada "step_days" (com base no departure)
+    sampled = []
+    last_dep: Optional[date] = None
+    for dep, ret in pairs:
+        if last_dep is None or (dep - last_dep).days >= step_days:
+            sampled.append((dep, ret))
+            last_dep = dep
+        if len(sampled) >= max_pairs:
+            break
+    return sampled
+
+
 def cap_pairs(pairs: List[Tuple[date, date]], max_pairs: Optional[int]) -> List[Tuple[date, date]]:
     if not max_pairs or max_pairs <= 0:
         return pairs
-    # pega os mais “próximos” do começo da janela (boa estratégia pra achar promo cedo)
     return pairs[:max_pairs]
 
 
@@ -179,25 +180,23 @@ def expand_routes(routes_base: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any
             trip_days = int(params.get("trip_days", 15))
             start_mm_dd = tuple(params.get("start_mm_dd", [9, 1]))
             latest_return_mm_dd = tuple(params.get("latest_return_mm_dd", [10, 5]))
-            max_pairs = params.get("max_pairs")
+            max_pairs = int(params.get("max_pairs", 12))
+            step_days = int(params.get("step_days", 2))
 
-            pairs = generate_rome_pairs(
-                year=today.year,
-                start_mm_dd=start_mm_dd,                  # type: ignore
-                latest_return_mm_dd=latest_return_mm_dd,  # type: ignore
-                trip_days=trip_days,
-            )
+            pairs = generate_rome_pairs(today.year, start_mm_dd, latest_return_mm_dd, trip_days)  # type: ignore
             if not pairs:
-                pairs = generate_rome_pairs(
-                    year=today.year + 1,
-                    start_mm_dd=start_mm_dd,                  # type: ignore
-                    latest_return_mm_dd=latest_return_mm_dd,  # type: ignore
-                    trip_days=trip_days,
-                )
+                pairs = generate_rome_pairs(today.year + 1, start_mm_dd, latest_return_mm_dd, trip_days)  # type: ignore
 
-            pairs = cap_pairs(pairs, int(max_pairs) if max_pairs is not None else None)
+            # ✅ sampling + cap pra não estourar
+            pairs = sample_pairs(pairs, step_days=step_days, max_pairs=max_pairs)
+
             if pairs:
-                expanded_ranges[rid] = {"min_dep": pairs[0][0].isoformat(), "max_dep": pairs[-1][0].isoformat(), "count": len(pairs)}
+                expanded_ranges[rid] = {
+                    "min_dep": pairs[0][0].isoformat(),
+                    "max_dep": pairs[-1][0].isoformat(),
+                    "count": len(pairs),
+                    "step_days": step_days,
+                }
 
             for dep, ret in pairs:
                 rr = dict(r)
@@ -211,22 +210,19 @@ def expand_routes(routes_base: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any
             depart_dows = tuple(params.get("depart_dows", [4, 5]))
             return_dows = tuple(params.get("return_dows", [6, 0]))
             max_trip_len_days = int(params.get("max_trip_len_days", 4))
-            max_pairs = params.get("max_pairs")
+            max_pairs = int(params.get("max_pairs", 16))
 
-            # ✅ PONTO CRÍTICO: base = hoje + offset
             base = today + timedelta(days=start_offset_days)
-
-            pairs = generate_weekend_pairs(
-                base=base,
-                horizon_days=horizon_days,
-                depart_dows=depart_dows,  # type: ignore
-                return_dows=return_dows,  # type: ignore
-                max_trip_len_days=max_trip_len_days,
-            )
-            pairs = cap_pairs(pairs, int(max_pairs) if max_pairs is not None else None)
+            pairs = generate_weekend_pairs(base, horizon_days, depart_dows, return_dows, max_trip_len_days)  # type: ignore
+            pairs = cap_pairs(pairs, max_pairs)
 
             if pairs:
-                expanded_ranges[rid] = {"min_dep": pairs[0][0].isoformat(), "max_dep": pairs[-1][0].isoformat(), "count": len(pairs), "base": base.isoformat()}
+                expanded_ranges[rid] = {
+                    "base": base.isoformat(),
+                    "min_dep": pairs[0][0].isoformat(),
+                    "max_dep": pairs[-1][0].isoformat(),
+                    "count": len(pairs),
+                }
 
             for dep, ret in pairs:
                 rr = dict(r)
@@ -235,49 +231,36 @@ def expand_routes(routes_base: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any
                 expanded.append(rr)
 
         else:
-            # rota fixa (se alguém quiser)
             if r.get("departure_date") and r.get("return_date"):
                 expanded.append(r)
 
-    # logs
     for rid, info in expanded_ranges.items():
         print(f"[INFO] Expanded range for {rid}: {info}")
 
     return expanded, expanded_ranges
 
 
-# =============================
-# Amadeus with retry/backoff
-# =============================
 def amadeus_base(env: str) -> str:
     return AMADEUS_TEST_BASE if env.lower() == "test" else AMADEUS_PROD_BASE
 
 
 def amadeus_get_token(client_id: str, client_secret: str, env: str) -> str:
-    base = amadeus_base(env)
-    url = f"{base}/v1/security/oauth2/token"
-    resp = requests.post(
-        url,
-        data={"grant_type": "client_credentials", "client_id": client_id, "client_secret": client_secret},
-        timeout=30,
-    )
+    url = f"{amadeus_base(env)}/v1/security/oauth2/token"
+    resp = requests.post(url, data={"grant_type": "client_credentials", "client_id": client_id, "client_secret": client_secret}, timeout=30)
     resp.raise_for_status()
     return resp.json()["access_token"]
 
 
-def request_with_retry(method: str, url: str, *, headers: Dict[str, str], params: Dict[str, Any], retries: int = 4) -> requests.Response:
+def request_with_retry(method: str, url: str, *, headers: Dict[str, str], params: Dict[str, Any], retries: int = 3) -> requests.Response:
     delay = 1.0
     last_resp: Optional[requests.Response] = None
 
     for attempt in range(1, retries + 1):
         resp = requests.request(method, url, headers=headers, params=params, timeout=45)
         last_resp = resp
-
-        # sucesso
         if resp.status_code < 400:
             return resp
 
-        # retry only for 429 / 5xx
         if resp.status_code == 429 or 500 <= resp.status_code <= 599:
             retry_after = resp.headers.get("Retry-After")
             if retry_after:
@@ -290,7 +273,6 @@ def request_with_retry(method: str, url: str, *, headers: Dict[str, str], params
             delay = min(delay * 2, 12.0)
             continue
 
-        # 4xx não-retry
         return resp
 
     assert last_resp is not None
@@ -311,9 +293,7 @@ def amadeus_search_offers(
     direct_only: bool,
     max_results: int,
 ) -> Tuple[Optional[List[Dict[str, Any]]], Optional[Dict[str, Any]]]:
-    base = amadeus_base(env)
-    url = f"{base}/v2/shopping/flight-offers"
-
+    url = f"{amadeus_base(env)}/v2/shopping/flight-offers"
     params: Dict[str, Any] = {
         "originLocationCode": origin,
         "destinationLocationCode": destination,
@@ -329,9 +309,7 @@ def amadeus_search_offers(
     if direct_only:
         params["nonStop"] = "true"
 
-    headers = {"Authorization": f"Bearer {token}"}
-    resp = request_with_retry("GET", url, headers=headers, params=params, retries=4)
-
+    resp = request_with_retry("GET", url, headers={"Authorization": f"Bearer {token}"}, params=params, retries=3)
     if resp.status_code >= 400:
         try:
             payload = resp.json()
@@ -340,51 +318,28 @@ def amadeus_search_offers(
         payload["_status"] = resp.status_code
         return None, payload
 
-    try:
-        payload = resp.json()
-    except Exception as e:
-        return None, {"_status": 200, "error": f"invalid_json: {e}"}
-
-    return payload.get("data", []) or [], None
+    return resp.json().get("data", []) or [], None
 
 
-# =============================
-# Offer normalization
-# =============================
 def extract_price_total(offer: Dict[str, Any]) -> Optional[float]:
-    for k in ("price_total", "total_price", "total"):
-        v = safe_float(offer.get(k))
-        if v is not None:
-            return v
     p = offer.get("price")
     if isinstance(p, dict):
         v = safe_float(p.get("grandTotal")) or safe_float(p.get("total"))
         if v is not None:
             return v
-    tp = offer.get("travelerPricings")
-    if isinstance(tp, list) and tp and isinstance(tp[0], dict):
-        pp = tp[0].get("price")
-        if isinstance(pp, dict):
-            v = safe_float(pp.get("grandTotal")) or safe_float(pp.get("total"))
-            if v is not None:
-                return v
     return None
 
 
 def normalize_offer(offer: Dict[str, Any]) -> Dict[str, Any]:
-    price = extract_price_total(offer)
-
     vac = offer.get("validatingAirlineCodes")
-    carrier = offer.get("carrier") or offer.get("airline") or offer.get("validating_airline")
+    carrier = None
+    if isinstance(vac, list) and vac:
+        carrier = vac[0]
+    elif isinstance(vac, str) and vac:
+        carrier = vac
     if not carrier:
-        if isinstance(vac, list) and vac:
-            carrier = vac[0]
-        elif isinstance(vac, str) and vac:
-            carrier = vac
-        else:
-            carrier = "?"
-
-    stops = None
+        carrier = "?"
+    stops = 99
     try:
         stops_calc = 0
         for it in offer.get("itineraries", []) or []:
@@ -392,29 +347,14 @@ def normalize_offer(offer: Dict[str, Any]) -> Dict[str, Any]:
             stops_calc = max(stops_calc, max(0, len(segs) - 1))
         stops = stops_calc
     except Exception:
-        stops = 99
+        pass
 
-    return {"price_total": price, "carrier": carrier, "stops": int(stops), "raw": offer}
+    return {"price_total": extract_price_total(offer), "carrier": carrier, "stops": int(stops), "raw": offer}
 
 
-# =============================
-# Best/Alerts
-# =============================
-def load_prev_best() -> Dict[str, Any]:
-    if not BEST_FILE.exists():
-        return {"by_route": {}}
-    try:
-        txt = BEST_FILE.read_text(encoding="utf-8").strip()
-        if not txt:
-            return {"by_route": {}}
-        data = json.loads(txt)
-        if not isinstance(data, dict):
-            return {"by_route": {}}
-        if "by_route" not in data or not isinstance(data.get("by_route"), dict):
-            data["by_route"] = {}
-        return data
-    except Exception:
-        return {"by_route": {}}
+def append_history_line(obj: Dict[str, Any]) -> None:
+    with HISTORY_FILE.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(obj, ensure_ascii=False) + "\n")
 
 
 def save_best(run_id: str, best_by_route: Dict[str, Any]) -> None:
@@ -425,41 +365,6 @@ def save_alerts(run_id: str, alerts: List[Dict[str, Any]]) -> None:
     ALERTS_FILE.write_text(json.dumps({"run_id": run_id, "updated_utc": utc_now_iso(), "alerts": alerts}, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
-def pick_best_offer(candidates: List[Dict[str, Any]], watch: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    norm = []
-    for c in candidates:
-        offer = c.get("offer")
-        if not isinstance(offer, dict):
-            continue
-        n = normalize_offer(offer)
-        if n["price_total"] is None:
-            continue
-        n["departure_date"] = c.get("departure_date")
-        n["return_date"] = c.get("return_date")
-        norm.append(n)
-
-    max_stops = watch.get("max_stops")
-    if max_stops is not None:
-        try:
-            ms = int(max_stops)
-            norm = [o for o in norm if o["stops"] <= ms]
-        except Exception:
-            pass
-
-    if not norm:
-        return None
-    norm.sort(key=lambda x: x["price_total"])
-    return norm[0]
-
-
-def append_history_line(obj: Dict[str, Any]) -> None:
-    with HISTORY_FILE.open("a", encoding="utf-8") as f:
-        f.write(json.dumps(obj, ensure_ascii=False) + "\n")
-
-
-# =============================
-# Main
-# =============================
 def main() -> None:
     started = utc_now()
     rid = run_id_utc()
@@ -467,7 +372,6 @@ def main() -> None:
     cfg = load_config()
     routes_base = cfg.get("routes") or []
     routes_expanded, expanded_ranges = expand_routes(routes_base)
-
     validate_immutable_rules(routes_expanded)
 
     amadeus_env = (os.getenv("AMADEUS_ENV") or "test").strip().lower()
@@ -478,24 +382,24 @@ def main() -> None:
 
     max_results = int(os.getenv("MAX_RESULTS", str(DEFAULT_MAX_RESULTS)))
 
-    print(f"[INFO] Run: {rid}")
-    print(f"[INFO] Routes expanded: {len(routes_expanded)} | Routes base: {len(routes_base)} | Env: {amadeus_env} | Max results: {max_results}")
-
     token = amadeus_get_token(client_id, client_secret, amadeus_env)
 
+    print(f"[INFO] Run: {rid}")
+    print(f"[INFO] total_calls={len(routes_expanded)} | REQUEST_SLEEP_SEC={REQUEST_SLEEP_SEC}")
+
     offers_by_route: Dict[str, List[Dict[str, Any]]] = {}
-    errors_by_route: Dict[str, List[Dict[str, Any]]] = {}
+    errors_sample: Dict[str, Any] = {}
+    offers_sample: Dict[str, Any] = {}
 
     ok_calls = 0
     err_calls = 0
     offers_saved = 0
 
-    debug = {"run_id": rid, "expanded_ranges": expanded_ranges, "errors_sample": {}, "offers_sample": {}}
+    consecutive_429 = 0
 
-    for r in routes_expanded:
+    for i, r in enumerate(routes_expanded, start=1):
         rk = route_key(r)
         offers_by_route.setdefault(rk, [])
-        errors_by_route.setdefault(rk, [])
 
         offers, err = amadeus_search_offers(
             token=token,
@@ -512,19 +416,33 @@ def main() -> None:
             max_results=max_results,
         )
 
+        # throttle SEMPRE entre calls
+        time.sleep(REQUEST_SLEEP_SEC)
+
         if err is not None:
             err_calls += 1
-            errors_by_route[rk].append({"ctx": {k: r.get(k) for k in ("origin","destination","departure_date","return_date","adults","children","direct_only")}, "err": err})
-            if rk not in debug["errors_sample"]:
-                debug["errors_sample"][rk] = err
+            status = err.get("_status")
+            if status == 429:
+                consecutive_429 += 1
+            else:
+                consecutive_429 = 0
+
+            if rk not in errors_sample:
+                errors_sample[rk] = {"ctx": {k: r.get(k) for k in ("origin","destination","departure_date","return_date","adults","children","direct_only")}, "err": err}
+
+            if consecutive_429 >= MAX_429_BEFORE_ABORT:
+                print(f"[FATAL] Muitos 429 consecutivos ({consecutive_429}). Abortando cedo para não queimar cota.")
+                break
+
             continue
 
+        consecutive_429 = 0
         ok_calls += 1
         assert offers is not None
         offers_saved += len(offers)
 
-        if offers and rk not in debug["offers_sample"]:
-            debug["offers_sample"][rk] = {"sample_offer_price": extract_price_total(offers[0]), "sample_offer": offers[0]}
+        if offers and rk not in offers_sample:
+            offers_sample[rk] = {"sample_price": extract_price_total(offers[0]), "sample_offer": offers[0]}
 
         for offer in offers:
             offers_by_route[rk].append({"offer": offer, "departure_date": r["departure_date"], "return_date": r["return_date"]})
@@ -544,23 +462,32 @@ def main() -> None:
                 }
             )
 
-    # Best + alerts
-    best_by_route: Dict[str, Any] = {}
-    alerts: List[Dict[str, Any]] = []
+        print(f"[OK] ({i}/{len(routes_expanded)}) {r['origin']}->{r['destination']} {r['departure_date']}/{r['return_date']} offers={len(offers)}")
 
+    # best_by_route (mínimo)
+    best_by_route: Dict[str, Any] = {}
     for r in routes_base:
         rk = route_key(r)
         watch = r.get("watch") or {}
-        best = pick_best_offer(offers_by_route.get(rk, []), watch)
+        best = None
+        best_price = None
+
+        for c in offers_by_route.get(rk, []):
+            n = normalize_offer(c["offer"])
+            if n["price_total"] is None:
+                continue
+            max_stops = watch.get("max_stops")
+            if max_stops is not None:
+                try:
+                    if n["stops"] > int(max_stops):
+                        continue
+                except Exception:
+                    pass
+            if best is None or n["price_total"] < best_price:
+                best = (n, c)
+                best_price = n["price_total"]
 
         if best is None:
-            # motivo simples
-            note = "no_offers_after_filters"
-            if errors_by_route.get(rk) and not offers_by_route.get(rk):
-                note = "all_calls_failed"
-            elif not errors_by_route.get(rk) and not offers_by_route.get(rk):
-                note = "no_offers_returned"
-
             best_by_route[rk] = {
                 "id": r.get("id"),
                 "origin": r.get("origin"),
@@ -572,29 +499,27 @@ def main() -> None:
                 "price_total": None,
                 "departure_date": None,
                 "return_date": None,
-                "note": note,
+                "note": "no_offers_after_filters",
             }
-            continue
-
-        best_by_route[rk] = {
-            "id": r.get("id"),
-            "origin": r.get("origin"),
-            "destination": r.get("destination"),
-            "adults": int(r.get("adults", 1)),
-            "children": int(r.get("children", 0)),
-            "carrier": best["carrier"],
-            "stops": best["stops"],
-            "price_total": best["price_total"],
-            "departure_date": best.get("departure_date"),
-            "return_date": best.get("return_date"),
-        }
-
-        target = safe_float((watch.get("target_price_total")))
-        if target is not None and best["price_total"] <= target:
-            alerts.append({"type": "TARGET_PRICE", "route_key": rk, "current_price": best["price_total"], "target_price": target})
+        else:
+            n, c = best
+            best_by_route[rk] = {
+                "id": r.get("id"),
+                "origin": r.get("origin"),
+                "destination": r.get("destination"),
+                "adults": int(r.get("adults", 1)),
+                "children": int(r.get("children", 0)),
+                "carrier": n["carrier"],
+                "stops": n["stops"],
+                "price_total": n["price_total"],
+                "departure_date": c.get("departure_date"),
+                "return_date": c.get("return_date"),
+            }
 
     save_best(rid, best_by_route)
-    save_alerts(rid, alerts)
+    save_alerts(rid, [])
+
+    debug = {"run_id": rid, "expanded_ranges": expanded_ranges, "errors_sample": errors_sample, "offers_sample": offers_sample}
     DEBUG_FILE.write_text(json.dumps(debug, ensure_ascii=False, indent=2), encoding="utf-8")
 
     finished = utc_now()
@@ -611,16 +536,19 @@ def main() -> None:
         "amadeus_env": amadeus_env,
         "max_results": max_results,
         "expanded_ranges": expanded_ranges,
+        "request_sleep_sec": REQUEST_SLEEP_SEC,
+        "max_429_before_abort": MAX_429_BEFORE_ABORT,
     }
     STATE_FILE.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
 
     SUMMARY_FILE.write_text(
         f"# Flight Agent — Update Summary\n\n"
         f"- run_id: `{rid}`\n"
-        f"- ok_calls: `{ok_calls}`\n"
-        f"- err_calls: `{err_calls}`\n"
-        f"- offers_saved: `{offers_saved}`\n"
-        f"- total_calls: `{len(routes_expanded)}`\n"
+        f"- total_calls: `{state['total_calls']}`\n"
+        f"- ok_calls: `{state['ok_calls']}`\n"
+        f"- err_calls: `{state['err_calls']}`\n"
+        f"- offers_saved: `{state['offers_saved']}`\n"
+        f"- request_sleep_sec: `{REQUEST_SLEEP_SEC}`\n"
         f"- expanded_ranges: `{json.dumps(expanded_ranges, ensure_ascii=False)}`\n",
         encoding="utf-8",
     )
