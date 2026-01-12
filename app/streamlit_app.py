@@ -14,13 +14,9 @@ if str(APP_DIR) not in sys.path:
     sys.path.insert(0, str(APP_DIR))
 
 from utilitario.history_store import HistoryStore
-from utilitario.analytics import (
-    build_dashboard_snapshot,
-    query_events_for_table,
-)
+from utilitario.analytics import query_events_for_table
 
 st.set_page_config(page_title="Flight Agent", layout="wide")
-
 st.title("✈️ Flight Agent — Histórico & Insights")
 
 # -----------------------------
@@ -63,12 +59,8 @@ def normalize_table(rows: List[Dict[str, Any]]) -> pd.DataFrame:
             df[c] = None
 
     # ofertas_count para numérico
-    if "offers_count" in df.columns:
-        df["offers_count"] = pd.to_numeric(df["offers_count"], errors="coerce")
-
-    # best_price para numérico
-    if "best_price" in df.columns:
-        df["best_price"] = pd.to_numeric(df["best_price"], errors="coerce")
+    df["offers_count"] = pd.to_numeric(df["offers_count"], errors="coerce")
+    df["best_price"] = pd.to_numeric(df["best_price"], errors="coerce")
 
     # erro booleano
     df["has_error"] = df["error"].apply(lambda x: bool(x) and str(x).strip().lower() not in ["none", "null", ""])
@@ -81,8 +73,6 @@ def normalize_table(rows: List[Dict[str, Any]]) -> pd.DataFrame:
 
     # ts_utc parse
     df["ts_utc_dt"] = pd.to_datetime(df["ts_utc"], errors="coerce", utc=True)
-
-    # Ordena por data
     df = df.sort_values("ts_utc_dt", ascending=False)
 
     return df
@@ -95,19 +85,34 @@ st.sidebar.header("Filtros")
 store_name = st.sidebar.text_input("Store", value="default").strip() or "default"
 days = st.sidebar.slider("Janela (dias)", 1, 365, 30)
 
-# type
-type_filter_str = st.sidebar.text_input("Type (vírgula, opcional)", value="flight_search").strip()
+# ✅ ajuste fino: default vazio pra não esconder tudo
+type_filter_str = st.sidebar.text_input("Type (vírgula, opcional)", value="").strip()
 type_filter = [t.strip() for t in type_filter_str.split(",") if t.strip()] if type_filter_str else None
 
-# rota
 origin = st.sidebar.text_input("Origin (ex: CGH)", value="").strip().upper()
 destination = st.sidebar.text_input("Destination (ex: CWB)", value="").strip().upper()
 
-# erros
 only_errors = st.sidebar.checkbox("Somente com erro", value=False)
 hide_errors = st.sidebar.checkbox("Ocultar com erro", value=False)
 
 st.sidebar.divider()
+st.sidebar.subheader("Teste manual")
+store = HistoryStore(store_name)
+if st.sidebar.button("Append exemplo"):
+    store.append(
+        "flight_search",
+        {
+            "run_id": "manual-test",
+            "origin": "CGH",
+            "destination": "CWB",
+            "currency": "BRL",
+            "offers_count": 12,
+            "best_price": 399.90,
+            "direct_only": True,
+            "error": None,
+        },
+    )
+    st.sidebar.success("Evento de teste gravado.")
 
 # -----------------------------
 # Carregar dados
@@ -118,16 +123,14 @@ rows = query_events_for_table(
     days=days,
     limit=5000,
 )
-
 df = normalize_table(rows)
 
-# aplica filtros de rota
+# aplica filtros de rota/erro
 if not df.empty:
     if origin:
         df = df[df["origin"].astype(str).str.upper() == origin]
     if destination:
         df = df[df["destination"].astype(str).str.upper() == destination]
-
     if only_errors:
         df = df[df["has_error"] == True]
     if hide_errors:
@@ -143,8 +146,7 @@ kpi1, kpi2, kpi3, kpi4, kpi5 = st.columns(5)
 total_events = int(df.shape[0]) if not df.empty else 0
 total_errors = int(df["has_error"].sum()) if not df.empty else 0
 last_ts = df["ts_utc"].iloc[0] if not df.empty else None
-
-total_offers = int(df["offers_count"].fillna(0).sum()) if (not df.empty and "offers_count" in df.columns) else 0
+total_offers = int(df["offers_count"].fillna(0).sum()) if not df.empty else 0
 avg_best_price = float(df["best_price"].dropna().mean()) if (not df.empty and df["best_price"].notna().any()) else None
 
 kpi1.metric("Eventos", f"{total_events}")
@@ -192,7 +194,7 @@ st.subheader("💸 Melhor preço por rota")
 if df.empty:
     st.info("Sem dados.")
 elif df["best_price"].dropna().empty:
-    st.info("Não encontrei campo de preço no payload.")
+    st.info("Ainda não encontrei campo de preço nos eventos. Use 'Append exemplo' ou rode o scheduler pra gravar.")
 else:
     best = (
         df.dropna(subset=["best_price"])
@@ -208,7 +210,6 @@ st.divider()
 # Tabela principal
 # -----------------------------
 st.subheader("🧾 Eventos (tabela limpa)")
-
 if df.empty:
     st.info("Nada encontrado com os filtros atuais.")
 else:
@@ -225,7 +226,6 @@ else:
         "error",
     ]
     cols = [c for c in cols if c in df.columns]
-
     st.dataframe(df[cols].head(1000), use_container_width=True)
 
     st.download_button(
@@ -236,24 +236,31 @@ else:
     )
 
 # -----------------------------
-# Teste manual rápido
+# ✅ Diagnóstico rápido (pra saber se tem dado e onde)
 # -----------------------------
-st.sidebar.divider()
-st.sidebar.subheader("Teste manual")
+st.divider()
+st.subheader("🔎 Diagnóstico rápido (data/jsonl)")
 
-store = HistoryStore(store_name)
-if st.sidebar.button("Append exemplo"):
-    store.append(
-        "flight_search",
-        {
-            "run_id": "manual-test",
-            "origin": "CGH",
-            "destination": "CWB",
-            "currency": "BRL",
-            "offers_count": 12,
-            "best_price": 399.90,
-            "direct_only": True,
-            "error": None,
-        },
-    )
-    st.sidebar.success("Evento de teste gravado.")
+data_dir = Path("data")
+st.write("Diretório data existe?", data_dir.exists())
+
+if data_dir.exists():
+    files = sorted([p.name for p in data_dir.glob("*.jsonl")])
+    st.write("Arquivos JSONL em /data:", files)
+
+    store_path = data_dir / f"{store_name}.jsonl"
+    st.write("Arquivo do store atual:", str(store_path))
+    st.write("Existe?", store_path.exists())
+
+    if store_path.exists():
+        st.write("Tamanho (bytes):", store_path.stat().st_size)
+        try:
+            lines = store_path.read_text(encoding="utf-8").strip().splitlines()
+            st.write("Linhas no store:", len(lines))
+            if lines:
+                st.write("Última linha (raw):")
+                st.code(lines[-1][:2000])
+        except Exception as e:
+            st.exception(e)
+else:
+    st.warning("Sem pasta data — seu app ainda não gravou nada.")
