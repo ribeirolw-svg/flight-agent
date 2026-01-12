@@ -40,10 +40,14 @@ jobs:
           AMADEUS_CLIENT_SECRET: ${{ secrets.AMADEUS_CLIENT_SECRET }}
           DATA_DIR: data
           AMADEUS_MAX_RESULTS: "10"
+          # (opcional) se você quiser mudar nomes:
+          ROUTES_FILE: routes.yaml
+          ALERTS_FILE: alerts.yaml
+          STORE_NAME: default
         run: |
           python scheduler.py
 
-      - name: Commit and push updated data files
+      - name: Commit and push updated data files (inclui alerts)
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
@@ -51,7 +55,8 @@ jobs:
           # Garanta que a pasta existe (só por segurança)
           mkdir -p data
 
-          git add data/state.json data/summary.md data/history.jsonl || true
+          # Persistência completa dos artefatos gerados
+          git add data/state.json data/summary.md data/history.jsonl data/alerts.json || true
 
           # Se nada mudou, não falha o job
           git diff --cached --quiet && echo "No changes to commit" && exit 0
