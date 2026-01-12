@@ -21,7 +21,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0  # necessário para rebase
+          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -33,7 +33,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Run scheduler
+      - name: Run scheduler (SAFE)
         run: |
           echo "Running scheduler..."
           python scheduler.py
@@ -41,9 +41,18 @@ jobs:
           AMADEUS_CLIENT_ID: ${{ secrets.AMADEUS_CLIENT_ID }}
           AMADEUS_CLIENT_SECRET: ${{ secrets.AMADEUS_CLIENT_SECRET }}
           AMADEUS_ENV: test
+
+          # performance / safety knobs
           MAX_RESULTS: "5"
-          REQUEST_SLEEP_SEC: "2.0"
+          REQUEST_SLEEP_SEC: "2.5"
           MAX_429_BEFORE_ABORT: "1"
+          COOLDOWN_BEFORE_START_SEC: "12"
+          COOLDOWN_ON_429_SEC: "25"
+
+          # SAFE mode: 1 base route per run (round-robin)
+          SAFE_MODE: "1"
+          # Optional: force a specific route id for a manual run
+          # FORCE_ROUTE_ID: "ROMA_GRU_FCO_2A1C_DIRECT"
 
       - name: Commit & Push artifacts (rebase-safe)
         run: |
@@ -61,6 +70,7 @@ jobs:
             data/best_offers.json \
             data/alerts.json \
             data/debug_last_run.json \
+            data/rr_state.json \
             || true
 
           if git diff --cached --quiet; then
@@ -70,7 +80,7 @@ jobs:
 
           git commit -m "Update flight data (auto)"
 
-          # tenta 3x: rebase e push (evita o erro fetch first)
+          # 3 tentativas: fetch+rebase+push (evita 'fetch first')
           for i in 1 2 3; do
             echo "Push attempt $i/3..."
             git fetch origin main
