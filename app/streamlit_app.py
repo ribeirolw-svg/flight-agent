@@ -1,164 +1,178 @@
-from __future__ import annotations
-
-import streamlit as st
-import pandas as pd
+import json
 from datetime import datetime, timedelta, timezone
 
-from utils.history_store import (
-    ensure_jsonl,
-    load_records,
-    append_search_record,
-    SearchRecord,
-    utc_now_iso,
+import streamlit as st
+
+from utilitario import (
+    HistoryStore,
+    build_dashboard_snapshot,
+    query_events_for_table,
 )
 
-from utils.analytics import (
-    to_dataframe,
-    apply_filters,
-    summary_metrics,
-    group_views,
+st.set_page_config(page_title="Histórico & Analytics", layout="wide")
+
+st.title("📚 Histórico & Analytics (JSONL)")
+
+# -----------------------------
+# Sidebar - Config geral
+# -----------------------------
+st.sidebar.header("Config")
+
+store_name = st.sidebar.text_input("Nome do store", value="default")
+days = st.sidebar.slider("Janela (últimos N dias)", min_value=1, max_value=365, value=30)
+
+# Filtro por type (opcional)
+type_filter_str = st.sidebar.text_input(
+    "Filtrar por type (separar por vírgula, opcional)", value=""
+).strip()
+type_filter = None
+if type_filter_str:
+    type_filter = [t.strip() for t in type_filter_str.split(",") if t.strip()]
+
+# Busca textual simples no payload
+payload_search_key = st.sidebar.text_input(
+    "Buscar no payload - chave (ex: origin, destination, run_id, error)", value=""
+).strip()
+payload_search_value = st.sidebar.text_input(
+    "Buscar no payload - contém (texto)", value=""
+).strip()
+
+payload_contains = None
+if payload_search_key and payload_search_value:
+    # query_events_for_table usa paths diretos no payload (não prefixar com payload.)
+    payload_contains = {payload_search_key: payload_search_value}
+
+st.sidebar.divider()
+
+# -----------------------------
+# Área de teste - gravar evento manual
+# -----------------------------
+st.sidebar.subheader("Teste rápido: gravar evento")
+
+event_type = st.sidebar.text_input("type do evento", value="manual_test").strip()
+
+default_payload = {
+    "run_id": "test-run",
+    "note": "evento inserido manualmente",
+    "value": 123.45,
+}
+payload_text = st.sidebar.text_area(
+    "payload (JSON)",
+    value=json.dumps(default_payload, ensure_ascii=False, indent=2),
+    height=180,
 )
 
-st.set_page_config(page_title="Flight Tracker", layout="wide")
+store = HistoryStore(store_name)
 
+if st.sidebar.button("➕ Append evento no histórico"):
+    try:
+        payload = json.loads(payload_text) if payload_text.strip() else {}
+        if not isinstance(payload, dict):
+            st.sidebar.error("Payload precisa ser um JSON objeto (dict).")
+        else:
+            store.append(event_type=event_type, payload=payload)
+            st.sidebar.success("Evento gravado! ✅")
+    except json.JSONDecodeError as e:
+        st.sidebar.error(f"JSON inválido: {e}")
 
-@st.cache_data(show_spinner=False)
-def load_df(limit: int | None = None) -> pd.DataFrame:
-    ensure_jsonl()
-    recs = load_records(limit=limit)
-    return to_dataframe(recs)
+if st.sidebar.button("🧹 Limpar histórico (CUIDADO)"):
+    store.clear()
+    st.sidebar.warning("Histórico apagado.")
 
+# -----------------------------
+# Snapshot (métricas rápidas)
+# -----------------------------
+col1, col2 = st.columns([1, 2], gap="large")
 
-def format_brl(v: float | None) -> str:
-    if v is None:
-        return "-"
-    return f"R$ {v:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+with col1:
+    st.subheader("📌 Snapshot")
 
-
-st.title("✈️ Flight Tracker — Histórico & Insights")
-
-with st.sidebar:
-    st.header("⚙️ Config")
-
-    limit = st.number_input(
-        "Carregar últimos N registros (0 = tudo)",
-        min_value=0,
-        value=2000,
-        step=500,
+    snap = build_dashboard_snapshot(
+        store_name=store_name,
+        days=days,
+        type_filter=type_filter,
     )
-    limit_val = None if limit == 0 else int(limit)
 
-    refresh = st.button("🔄 Recarregar histórico")
+    st.metric("Total de eventos (janela)", snap["total_events"])
 
-    st.divider()
-    st.header("🔎 Filtros")
-
-df = load_df(limit=limit_val)
-
-if refresh:
-    st.cache_data.clear()
-    df = load_df(limit=limit_val)
-
-if df.empty:
-    st.info("Sem histórico ainda. Assim que você salvar registros, eles aparecem aqui.")
-    st.stop()
-
-# opções para filtros
-routes = ["(todas)"] + sorted(df["route"].dropna().unique().tolist()) if "route" in df.columns else ["(todas)"]
-airlines = ["(todas)"] + sorted(df["best_airline"].dropna().unique().tolist()) if "best_airline" in df.columns else ["(todas)"]
-
-with st.sidebar:
-    sel_route = st.selectbox("Rota", routes, index=0)
-    sel_airline = st.selectbox("Cia", airlines, index=0)
-
-    if "direct_only" in df.columns:
-        direct_opt = st.selectbox("Somente direto", ["(tanto faz)", "Sim", "Não"], index=0)
-        direct_only = None if direct_opt == "(tanto faz)" else (direct_opt == "Sim")
+    st.write("**Contagem por type**")
+    if snap["count_by_type"]:
+        st.json(snap["count_by_type"])
     else:
-        direct_only = None
+        st.info("Sem eventos no período.")
 
-    # janela de tempo
-    days = st.slider("Janela (dias)", min_value=1, max_value=180, value=30, step=1)
-    date_from = datetime.now(timezone.utc) - timedelta(days=int(days))
-    date_to = datetime.now(timezone.utc)
+with col2:
+    st.subheader("📈 Série diária (count)")
+    daily = snap["daily_counts"]  # lista de (YYYY-MM-DD, count)
+    if daily:
+        # Streamlit aceita dict ou dataframe-like.
+        # Vamos montar um dict com datas como índice.
+        series_dict = {d: c for d, c in daily}
+        st.line_chart(series_dict)
+    else:
+        st.info("Sem dados pra plotar.")
 
-route_val = None if sel_route == "(todas)" else sel_route
-airline_val = None if sel_airline == "(todas)" else sel_airline
+st.divider()
 
-df_f = apply_filters(
-    df,
-    route=route_val,
-    airline=airline_val,
-    direct_only=direct_only,
-    date_from=date_from,
-    date_to=date_to,
+# -----------------------------
+# Tabela detalhada + filtros avançados
+# -----------------------------
+st.subheader("🧾 Eventos (tabela)")
+
+rows = query_events_for_table(
+    store_name=store_name,
+    event_types=type_filter,
+    days=days,
+    payload_contains=payload_contains,
+    limit=1000,
 )
 
-m = summary_metrics(df_f)
+st.caption(
+    f"Mostrando até {min(len(rows), 1000)} evento(s) do store '{store_name}' "
+    f"na janela de {days} dias"
+    + (f" | type={type_filter}" if type_filter else "")
+    + (f" | contains {payload_search_key}~'{payload_search_value}'" if payload_contains else "")
+)
 
-# métricas topo
-c1, c2, c3, c4, c5 = st.columns(5)
-c1.metric("Registros", m["rows"])
-c2.metric("Menor preço", format_brl(m["best_price_min"]))
-c3.metric("Preço médio", format_brl(m["best_price_avg"]))
-c4.metric("Maior preço", format_brl(m["best_price_max"]))
-trend = m["trend_pct"]
-trend_txt = "-" if trend is None else f"{trend:+.1f}%"
-c5.metric("Tendência", trend_txt)
+if rows:
+    st.dataframe(rows, use_container_width=True)
 
-if m["last_seen"]:
-    st.caption(f"Última consulta no filtro: {m['last_seen']} (UTC)")
-
-st.divider()
-
-left, right = st.columns([1.2, 1])
-
-with left:
-    st.subheader("📋 Histórico filtrado (tabela calculável)")
-    show_cols = [c for c in [
-        "ts_utc", "origin", "destination", "route", "departure_date", "return_date",
-        "best_airline", "best_price", "best_stops", "offers_count",
-        "direct_only", "cabin", "currency", "provider"
-    ] if c in df_f.columns]
-
-    dshow = df_f[show_cols].sort_values("ts_utc", ascending=False)
-    st.dataframe(dshow, use_container_width=True, height=520)
-
-with right:
-    st.subheader("📈 Visões rápidas")
-    by_route, by_airline = group_views(df_f)
-
-    if not by_route.empty:
-        st.write("**Por rota**")
-        st.dataframe(by_route, use_container_width=True, height=240)
-
-    if not by_airline.empty:
-        st.write("**Por cia**")
-        st.dataframe(by_airline, use_container_width=True, height=240)
-
-st.divider()
-
-st.subheader("🧪 Exemplo: botão para gravar um registro (teste)")
-st.caption("Use isso só pra validar persistência. Depois você substitui pela gravação real após a consulta no Amadeus.")
-
-if st.button("➕ Adicionar registro fake"):
-    fake = SearchRecord(
-        ts_utc=utc_now_iso(),
-        origin="CGH",
-        destination="CWB",
-        departure_date="2026-01-30",
-        return_date="2026-02-02",
-        adults=2,
-        children=1,
-        cabin="ECONOMY",
-        currency="BRL",
-        direct_only=True,
-        best_price=412.00,
-        best_airline="LATAM",
-        best_stops=0,
-        offers_count=10,
-        run_id="demo",
-        extra={"note": "registro fake para teste"},
+    # Download
+    st.download_button(
+        "⬇️ Baixar JSON (linhas)",
+        data="\n".join(json.dumps(r, ensure_ascii=False) for r in rows),
+        file_name=f"{store_name}_events_{days}d.jsonl",
+        mime="application/json",
     )
-    append_search_record(fake)
-    st.success("Gravado! Clica em 'Recarregar histórico'.")
+else:
+    st.info("Nada encontrado com os filtros atuais.")
+
+st.divider()
+
+# -----------------------------
+# Resumo numérico opcional (se existir campo no payload)
+# -----------------------------
+st.subheader("🧮 Resumo numérico (opcional)")
+
+st.write(
+    "Se você tiver um campo numérico no payload (ex: `price_total`, `value`, `amount`), "
+    "dá pra tirar soma/média/min/max por janela e type."
+)
+
+numeric_key = st.text_input("Chave numérica no payload (ex: value, price, amount)", value="value").strip()
+
+# Import só aqui pra manter o topo limpo
+from utilitario.analytics import numeric_summary
+
+if st.button("Calcular resumo numérico"):
+    # Reaproveita a mesma janela/filtro
+    # Carregamos os eventos via query_events_for_table é “achatado”, então vamos usar o store direto:
+    from utilitario.analytics import load_events, last_n_days, filter_events
+
+    events = load_events(store)
+    events = last_n_days(events, days)
+    if type_filter:
+        events = filter_events(events, event_types=type_filter)
+
+    summary = numeric_summary(events, numeric_key)
+    st.json(summary)
