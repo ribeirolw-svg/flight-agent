@@ -1,132 +1,56 @@
 from __future__ import annotations
 
-import json
+import os
 import sys
 from pathlib import Path
 
-import pandas as pd
-import streamlit as st
-
-APP_DIR = Path(__file__).resolve().parent
+# -------------------------------------------------------------------
+# PATH FIX: garante que o Python encontre /app e seus módulos
+# -------------------------------------------------------------------
+ROOT_DIR = Path(__file__).resolve().parent
+APP_DIR = ROOT_DIR / "app"
 if str(APP_DIR) not in sys.path:
     sys.path.insert(0, str(APP_DIR))
 
-from utilitario.history_store import HistoryStore
-from utilitario.analytics import build_dashboard_snapshot, query_events_for_table
+# Agora esses imports funcionam no GitHub Actions e local
+from search import run_search_and_store  # search.py está em /app
+# (se o seu search.py estiver fora de /app, me avisa; mas pelo seu log, é assim que está no streamlit)
 
+def main() -> None:
+    client_id = os.environ.get("AMADEUS_CLIENT_ID", "").strip()
+    client_secret = os.environ.get("AMADEUS_CLIENT_SECRET", "").strip()
+    if not client_id or not client_secret:
+        raise RuntimeError("Missing AMADEUS_CLIENT_ID / AMADEUS_CLIENT_SECRET env vars")
 
-st.set_page_config(page_title="Flight Agent", layout="wide")
-st.title("✈️ Flight Agent — Dashboard")
+    store_name = os.environ.get("STORE_NAME", "default").strip() or "default"
+    origin = os.environ.get("ORIGIN", "CGH").strip().upper()
+    destination = os.environ.get("DESTINATION", "CWB").strip().upper()
+    departure_date = os.environ.get("DEPARTURE_DATE", "2026-01-30").strip()
+    return_date = os.environ.get("RETURN_DATE", "").strip() or None
 
-st.sidebar.header("Filtros")
-store_name = st.sidebar.text_input("Store", "default").strip() or "default"
-days = st.sidebar.slider("Janela (dias)", 1, 365, 30)
+    adults = int(os.environ.get("ADULTS", "2"))
+    children = int(os.environ.get("CHILDREN", "1"))
+    cabin = os.environ.get("CABIN", "ECONOMY").strip().upper()
+    currency = os.environ.get("CURRENCY", "BRL").strip().upper()
+    direct_only = os.environ.get("DIRECT_ONLY", "true").strip().lower() == "true"
 
-type_filter_str = st.sidebar.text_input("Type (vírgula, opcional)", "flight_search").strip()
-type_filter = [t.strip() for t in type_filter_str.split(",") if t.strip()] if type_filter_str else None
-
-origin = st.sidebar.text_input("Origin", "").strip().upper()
-destination = st.sidebar.text_input("Destination", "").strip().upper()
-only_errors = st.sidebar.checkbox("Somente erros", False)
-
-# Carrega dados
-rows = query_events_for_table(store_name=store_name, event_types=type_filter, days=days, limit=5000)
-df = pd.DataFrame(rows) if rows else pd.DataFrame()
-
-if not df.empty:
-    # normaliza colunas esperadas
-    for c in ["origin", "destination", "currency", "offers_count", "best_price", "error", "direct_only", "run_id", "ts_utc"]:
-        if c not in df.columns:
-            df[c] = None
-
-    df["offers_count"] = pd.to_numeric(df["offers_count"], errors="coerce")
-    df["best_price"] = pd.to_numeric(df["best_price"], errors="coerce")
-    df["has_error"] = df["error"].apply(lambda x: bool(x) and str(x).strip().lower() not in ["none", "null", ""])
-
-    if origin:
-        df = df[df["origin"].astype(str).str.upper() == origin]
-    if destination:
-        df = df[df["destination"].astype(str).str.upper() == destination]
-    if only_errors:
-        df = df[df["has_error"] == True]
-
-    df["ts_utc_dt"] = pd.to_datetime(df["ts_utc"], errors="coerce", utc=True)
-    df = df.sort_values("ts_utc_dt", ascending=False)
-
-# KPIs
-st.subheader("📌 Resumo")
-c1, c2, c3, c4, c5 = st.columns(5)
-
-total = int(df.shape[0]) if not df.empty else 0
-errors = int(df["has_error"].sum()) if not df.empty else 0
-last_ts = df["ts_utc"].iloc[0] if not df.empty else "-"
-offers_sum = int(df["offers_count"].fillna(0).sum()) if not df.empty else 0
-best_min = float(df["best_price"].min()) if (not df.empty and df["best_price"].notna().any()) else None
-
-c1.metric("Eventos", total)
-c2.metric("Erros", errors)
-c3.metric("Último evento (UTC)", last_ts)
-c4.metric("Ofertas (soma)", offers_sum)
-c5.metric("Melhor preço (min)", "-" if best_min is None else f"{best_min:,.2f}")
-
-# Gráficos
-st.subheader("📈 Evolução do melhor preço")
-if df.empty or df["best_price"].dropna().empty:
-    st.info("Sem preços ainda. Rode o scheduler/busca para gravar eventos com best_price.")
-else:
-    price_ts = (
-        df.dropna(subset=["ts_utc_dt", "best_price"])
-          .sort_values("ts_utc_dt")
-          .set_index("ts_utc_dt")["best_price"]
-    )
-    st.line_chart(price_ts)
-
-# Melhor por rota
-st.subheader("💸 Melhor preço por rota")
-if df.empty or df["best_price"].dropna().empty:
-    st.info("Sem dados suficientes.")
-else:
-    df["route"] = df["origin"].astype(str) + " → " + df["destination"].astype(str)
-    best_routes = (
-        df.dropna(subset=["best_price"])
-          .groupby("route", as_index=False)
-          .agg(best_price=("best_price", "min"), samples=("best_price", "count"))
-          .sort_values("best_price")
-    )
-    st.dataframe(best_routes, use_container_width=True)
-
-# Tabela limpa
-st.subheader("🧾 Eventos (limpo)")
-if df.empty:
-    st.info("Nada encontrado com os filtros atuais.")
-else:
-    cols = ["ts_utc", "origin", "destination", "currency", "offers_count", "best_price", "direct_only", "error", "run_id"]
-    cols = [c for c in cols if c in df.columns]
-    st.dataframe(df[cols].head(1000), use_container_width=True)
-
-    st.download_button(
-        "⬇️ Baixar JSONL filtrado",
-        data="\n".join(json.dumps(r, ensure_ascii=False) for r in df[cols].to_dict(orient="records")),
-        file_name=f"{store_name}_filtered_{days}d.jsonl",
-        mime="application/json",
+    result = run_search_and_store(
+        store_name=store_name,
+        client_id=client_id,
+        client_secret=client_secret,
+        origin=origin,
+        destination=destination,
+        departure_date=departure_date,
+        return_date=return_date,
+        adults=adults,
+        children=children,
+        cabin=cabin,
+        currency=currency,
+        direct_only=direct_only,
     )
 
-# Teste manual (opcional)
-st.sidebar.divider()
-st.sidebar.subheader("Teste manual: append")
-store = HistoryStore(store_name)
-if st.sidebar.button("Append evento fake de exemplo"):
-    store.append(
-        "flight_search",
-        {
-            "run_id": "manual-example",
-            "origin": "CGH",
-            "destination": "CWB",
-            "currency": "BRL",
-            "offers_count": 10,
-            "best_price": 399.90,
-            "direct_only": True,
-            "error": None,
-        },
-    )
-    st.sidebar.success("Gravado.")
+    print("Search stored:", result)
+
+
+if __name__ == "__main__":
+    main()
