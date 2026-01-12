@@ -40,10 +40,10 @@ jobs:
           AMADEUS_CLIENT_SECRET: ${{ secrets.AMADEUS_CLIENT_SECRET }}
           AMADEUS_ENV: test
           MAX_RESULTS: "10"
-          # ✅ throttling para reduzir 429
-          REQUEST_SLEEP_SEC: "0.35"
-          # ✅ aborta cedo se entrar em espiral de 429
-          MAX_429_BEFORE_ABORT: "6"
+          # ✅ Anti-429: reduz pressão na API
+          REQUEST_SLEEP_SEC: "0.60"
+          # ✅ Anti-429: se começar a tomar 429 em sequência, aborta cedo
+          MAX_429_BEFORE_ABORT: "3"
 
       - name: Commit artifacts
         run: |
@@ -52,7 +52,6 @@ jobs:
 
           mkdir -p data
 
-          # Persistência dos artefatos gerados
           git add \
             data/state.json \
             data/summary.md \
