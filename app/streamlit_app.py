@@ -1,162 +1,244 @@
-# app/streamlit_app.py
 from __future__ import annotations
 
 import json
 import sys
 from pathlib import Path
-import importlib
+from typing import Any, Dict, List, Optional
 
+import pandas as pd
 import streamlit as st
 
-# ----------------------------
-# PATH FIX (Streamlit Cloud safe)
-# ----------------------------
+# --- garantir que /app está no sys.path (cloud-safe)
 APP_DIR = Path(__file__).resolve().parent
 if str(APP_DIR) not in sys.path:
     sys.path.insert(0, str(APP_DIR))
 
-st.set_page_config(page_title="Flight Agent - Debug", layout="wide")
-st.title("✈️ Flight Agent — Debug de Imports")
-
-# ----------------------------
-# Debug de filesystem (antes de importar qualquer coisa)
-# ----------------------------
-st.subheader("1) Debug do filesystem")
-st.write("APP_DIR:", str(APP_DIR))
-st.write("sys.path[0:5]:", sys.path[:5])
-
-# Lista o que existe dentro de /app
-try:
-    app_items = sorted([p.name for p in APP_DIR.iterdir()])
-    st.write("Conteúdo de /app:", app_items)
-except Exception as e:
-    st.error("Não consegui listar /app")
-    st.exception(e)
-    st.stop()
-
-util_dir = APP_DIR / "utilitario"
-st.write("Existe /app/utilitario ?", util_dir.exists())
-if util_dir.exists():
-    util_items = sorted([p.name for p in util_dir.iterdir()])
-    st.write("Conteúdo de /app/utilitario:", util_items)
-else:
-    st.error("❌ /app/utilitario NÃO existe no deploy. Isso explica tudo.")
-    st.info("Garanta que a pasta utilitario está dentro da pasta app e commit/push no GitHub.")
-    st.stop()
-
-st.divider()
-
-# ----------------------------
-# Import dinâmico (pra não morrer antes de mostrar debug)
-# ----------------------------
-st.subheader("2) Tentando importar módulos")
-
-def _import_or_stop(module_name: str):
-    try:
-        m = importlib.import_module(module_name)
-        st.success(f"✅ Import OK: {module_name}")
-        return m
-    except Exception as e:
-        st.error(f"❌ Falha ao importar: {module_name}")
-        st.exception(e)
-        st.stop()
-
-history_store_mod = _import_or_stop("utilitario.history_store")
-analytics_mod = _import_or_stop("utilitario.analytics")
-
-# pega as funções/classes do módulo
-HistoryStore = getattr(history_store_mod, "HistoryStore", None)
-build_dashboard_snapshot = getattr(analytics_mod, "build_dashboard_snapshot", None)
-query_events_for_table = getattr(analytics_mod, "query_events_for_table", None)
-load_events = getattr(analytics_mod, "load_events", None)
-last_n_days = getattr(analytics_mod, "last_n_days", None)
-filter_events = getattr(analytics_mod, "filter_events", None)
-numeric_summary = getattr(analytics_mod, "numeric_summary", None)
-
-missing = [name for name, obj in {
-    "HistoryStore": HistoryStore,
-    "build_dashboard_snapshot": build_dashboard_snapshot,
-    "query_events_for_table": query_events_for_table,
-    "load_events": load_events,
-    "last_n_days": last_n_days,
-    "filter_events": filter_events,
-    "numeric_summary": numeric_summary,
-}.items() if obj is None]
-
-if missing:
-    st.error("Módulos importaram, mas faltam símbolos:")
-    st.write(missing)
-    st.stop()
-
-st.divider()
-
-# ----------------------------
-# App normal (se chegou até aqui, import tá OK)
-# ----------------------------
-st.subheader("3) App (funcional)")
-
-store_name = st.sidebar.text_input("Nome do store", value="default").strip() or "default"
-days = st.sidebar.slider("Janela (últimos N dias)", 1, 365, 30)
-
-type_filter_str = st.sidebar.text_input("Filtrar por type (vírgula, opcional)", value="").strip()
-type_filter = [t.strip() for t in type_filter_str.split(",") if t.strip()] if type_filter_str else None
-
-payload_key = st.sidebar.text_input("Payload key (opcional)", value="").strip()
-payload_value = st.sidebar.text_input("Payload contém (opcional)", value="").strip()
-payload_contains = {payload_key: payload_value} if payload_key and payload_value else None
-
-store = HistoryStore(store_name)
-
-st.sidebar.subheader("Teste rápido: Append")
-event_type = st.sidebar.text_input("type", value="manual_test").strip() or "manual_test"
-payload_text = st.sidebar.text_area(
-    "payload JSON",
-    value=json.dumps({"run_id": "test", "value": 123.45}, ensure_ascii=False, indent=2),
-    height=120,
+from utilitario.history_store import HistoryStore
+from utilitario.analytics import (
+    load_events,
+    filter_events,
+    last_n_days,
+    count_by_type,
+    query_events_for_table,
 )
 
-c1, c2 = st.sidebar.columns(2)
-with c1:
-    if st.button("➕ Append", use_container_width=True):
+st.set_page_config(page_title="Flight Agent", layout="wide")
+
+st.title("✈️ Flight Agent — Histórico & Insights")
+
+# -----------------------------
+# Helpers
+# -----------------------------
+PRICE_KEYS = ["best_price", "price", "total_price", "min_price", "amount", "valor", "preco", "price_total"]
+
+def pick_price(row: Dict[str, Any]) -> Optional[float]:
+    for k in PRICE_KEYS:
+        v = row.get(k)
+        if v is None:
+            continue
         try:
-            payload = json.loads(payload_text) if payload_text.strip() else {}
-            if not isinstance(payload, dict):
-                st.sidebar.error("Payload precisa ser JSON objeto (dict).")
-            else:
-                store.append(event_type=event_type, payload=payload)
-                st.sidebar.success("Gravado ✅")
-        except Exception as e:
-            st.sidebar.error("Erro ao gravar")
-            st.sidebar.exception(e)
+            if isinstance(v, str):
+                v2 = v.strip().replace(",", ".")
+                return float(v2)
+            return float(v)
+        except Exception:
+            continue
+    return None
 
-with c2:
-    if st.button("🧹 Clear", use_container_width=True):
-        store.clear()
-        st.sidebar.warning("Apagado.")
+def normalize_table(rows: List[Dict[str, Any]]) -> pd.DataFrame:
+    if not rows:
+        return pd.DataFrame()
 
-# Snapshot
-snap = build_dashboard_snapshot(store_name=store_name, days=days, type_filter=type_filter)
+    df = pd.DataFrame(rows)
 
-col1, col2 = st.columns([1, 2], gap="large")
-with col1:
-    st.metric("Total eventos", snap.get("total_events", 0))
-    st.write("**Count by type**")
-    st.json(snap.get("count_by_type", {}))
+    # Garantir colunas mínimas
+    for c in ["ts_utc", "type"]:
+        if c not in df.columns:
+            df[c] = None
 
-with col2:
-    daily = snap.get("daily_counts", [])
-    if daily:
-        st.line_chart({d: c for d, c in daily})
-    else:
-        st.info("Sem dados na janela.")
+    # Criar preço “best_price” se não existir
+    if "best_price" not in df.columns:
+        df["best_price"] = df.apply(lambda r: pick_price(r.to_dict()), axis=1)
 
-# Tabela
-st.subheader("Eventos")
+    # Padronizar algumas colunas comuns
+    for c in ["origin", "destination", "currency", "run_id", "offers_count", "direct_only", "error"]:
+        if c not in df.columns:
+            df[c] = None
+
+    # ofertas_count para numérico
+    if "offers_count" in df.columns:
+        df["offers_count"] = pd.to_numeric(df["offers_count"], errors="coerce")
+
+    # best_price para numérico
+    if "best_price" in df.columns:
+        df["best_price"] = pd.to_numeric(df["best_price"], errors="coerce")
+
+    # erro booleano
+    df["has_error"] = df["error"].apply(lambda x: bool(x) and str(x).strip().lower() not in ["none", "null", ""])
+
+    # rota
+    df["route"] = df.apply(
+        lambda r: f"{r.get('origin') or '-'} → {r.get('destination') or '-'}",
+        axis=1,
+    )
+
+    # ts_utc parse
+    df["ts_utc_dt"] = pd.to_datetime(df["ts_utc"], errors="coerce", utc=True)
+
+    # Ordena por data
+    df = df.sort_values("ts_utc_dt", ascending=False)
+
+    return df
+
+# -----------------------------
+# Sidebar - Filtros
+# -----------------------------
+st.sidebar.header("Filtros")
+
+store_name = st.sidebar.text_input("Store", value="default").strip() or "default"
+days = st.sidebar.slider("Janela (dias)", 1, 365, 30)
+
+# type
+type_filter_str = st.sidebar.text_input("Type (vírgula, opcional)", value="").strip()
+type_filter = [t.strip() for t in type_filter_str.split(",") if t.strip()] if type_filter_str else None
+
+# rota
+origin = st.sidebar.text_input("Origin (ex: CGH)", value="").strip().upper()
+destination = st.sidebar.text_input("Destination (ex: CWB)", value="").strip().upper()
+
+# erros
+only_errors = st.sidebar.checkbox("Somente com erro", value=False)
+hide_errors = st.sidebar.checkbox("Ocultar com erro", value=False)
+
+st.sidebar.divider()
+
+# -----------------------------
+# Carregar dados
+# -----------------------------
+store = HistoryStore(store_name)
+
+# usando query_events_for_table (mais simples pro dataframe)
 rows = query_events_for_table(
     store_name=store_name,
     event_types=type_filter,
     days=days,
-    payload_contains=payload_contains,
-    limit=1000,
+    payload_contains=None,  # filtros finos fazemos via pandas abaixo
+    limit=5000,
 )
-st.dataframe(rows, use_container_width=True) if rows else st.info("Nada encontrado.")
+
+df = normalize_table(rows)
+
+# aplica filtros de rota
+if not df.empty:
+    if origin:
+        df = df[df["origin"].astype(str).str.upper() == origin]
+    if destination:
+        df = df[df["destination"].astype(str).str.upper() == destination]
+
+    if only_errors:
+        df = df[df["has_error"] == True]
+    if hide_errors:
+        df = df[df["has_error"] == False]
+
+# -----------------------------
+# KPIs
+# -----------------------------
+st.subheader("📌 Resumo")
+
+kpi1, kpi2, kpi3, kpi4, kpi5 = st.columns(5)
+
+total_events = int(df.shape[0]) if not df.empty else 0
+total_errors = int(df["has_error"].sum()) if not df.empty else 0
+last_ts = df["ts_utc"].iloc[0] if not df.empty else None
+
+total_offers = int(df["offers_count"].fillna(0).sum()) if (not df.empty and "offers_count" in df.columns) else 0
+avg_best_price = float(df["best_price"].dropna().mean()) if (not df.empty and df["best_price"].notna().any()) else None
+
+kpi1.metric("Eventos", f"{total_events}")
+kpi2.metric("Erros", f"{total_errors}")
+kpi3.metric("Último evento (UTC)", last_ts or "-")
+kpi4.metric("Ofertas (soma)", f"{total_offers}")
+kpi5.metric("Preço médio", "-" if avg_best_price is None else f"{avg_best_price:,.2f}")
+
+# -----------------------------
+# Charts
+# -----------------------------
+c1, c2 = st.columns([1, 1], gap="large")
+
+with c1:
+    st.write("**Eventos por type**")
+    if df.empty:
+        st.info("Sem dados com os filtros atuais.")
+    else:
+        counts = df["type"].value_counts().reset_index()
+        counts.columns = ["type", "count"]
+        st.bar_chart(counts.set_index("type"))
+
+with c2:
+    st.write("**Eventos por dia**")
+    if df.empty or df["ts_utc_dt"].isna().all():
+        st.info("Sem datas válidas para plotar.")
+    else:
+        per_day = (
+            df.dropna(subset=["ts_utc_dt"])
+              .assign(day=lambda x: x["ts_utc_dt"].dt.date.astype(str))
+              .groupby("day")["type"]
+              .count()
+              .reset_index()
+              .rename(columns={"type": "count"})
+              .sort_values("day")
+        )
+        st.line_chart(per_day.set_index("day"))
+
+st.divider()
+
+# -----------------------------
+# Melhores preços por rota (se tiver preço)
+# -----------------------------
+st.subheader("💸 Melhor preço por rota (se disponível)")
+if df.empty:
+    st.info("Sem dados.")
+elif df["best_price"].dropna().empty:
+    st.info("Não encontrei campo de preço no payload. Se você me disser qual chave guarda o preço, eu ajusto.")
+else:
+    best = (
+        df.dropna(subset=["best_price"])
+          .groupby("route", as_index=False)
+          .agg(best_price=("best_price", "min"), samples=("best_price", "count"))
+          .sort_values("best_price")
+    )
+    st.dataframe(best, use_container_width=True)
+
+st.divider()
+
+# -----------------------------
+# Tabela principal (limpa)
+# -----------------------------
+st.subheader("🧾 Eventos (tabela limpa)")
+
+if df.empty:
+    st.info("Nada encontrado com os filtros atuais.")
+else:
+    # seleciona colunas úteis (se existirem)
+    cols = [
+        "ts_utc",
+        "type",
+        "run_id",
+        "origin",
+        "destination",
+        "currency",
+        "offers_count",
+        "best_price",
+        "direct_only",
+        "error",
+    ]
+    cols = [c for c in cols if c in df.columns]
+
+    st.dataframe(df[cols].head(1000), use_container_width=True)
+
+    st.download_button(
+        "⬇️ Baixar JSONL filtrado",
+        data="\n".join(json.dumps(r, ensure_ascii=False) for r in df.drop(columns=["ts_utc_dt"], errors="ignore").to_dict(orient="records")),
+        file_name=f"{store_name}_filtered_{days}d.jsonl",
+        mime="application/json",
+    )
