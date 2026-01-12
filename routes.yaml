@@ -1,8 +1,8 @@
 routes:
-  # ----------------------------
-  # ROMA: regra imutável
+  # ============================
+  # ROMA (imutável) — NÃO MEXER
   # Janela: ida >= 01/09 e retorno <= 05/10, duração 15 dias
-  # ----------------------------
+  # ============================
   - id: ROMA_GRU_FCO_2A1C_DIRECT
     origin: "GRU"
     destination: "FCO"
@@ -20,10 +20,11 @@ routes:
       target_price_total: 13000
       max_stops: 0
 
-  # ----------------------------
-  # CURITIBA: começa a procurar a partir de +60 dias
-  # e varre mais 60 dias (sex/sáb -> dom/seg)
-  # ----------------------------
+  # ==========================================
+  # CURITIBA — começa a procurar em D+60
+  # e varre uma janela de 60 dias
+  # sex/sáb -> dom/seg
+  # ==========================================
   - id: CWB_CGH_2A1C_DIRECT
     origin: "CGH"
     destination: "CWB"
@@ -43,11 +44,11 @@ routes:
       target_price_total: 800
       max_stops: 0
 
-  # ----------------------------
-  # NAVEGANTES: começa a procurar a partir de +60 dias
-  # e varre mais 60 dias (sex/sáb -> dom/seg)
-  # (1 adulto)
-  # ----------------------------
+  # ==========================================
+  # NAVEGANTES — começa a procurar em D+60
+  # e varre uma janela de 60 dias
+  # sex/sáb -> dom/seg
+  # ==========================================
   - id: NVT_GRU_1A
     origin: "GRU"
     destination: "NVT"
@@ -65,5 +66,3 @@ routes:
       max_trip_len_days: 4
     watch:
       target_price_total: 350
-      # (se quiser forçar sem paradas em NVT também, descomenta)
-      # max_stops: 0
