@@ -1,0 +1,48 @@
+{
+  "run_id": "20260112T173350Z",
+  "expanded_ranges": {
+    "ROMA_GRU_FCO_2A1C_DIRECT": {
+      "min_dep": "2026-09-01",
+      "max_dep": "2026-09-19",
+      "count": 10,
+      "step_days": 2
+    },
+    "CWB_CGH_2A1C_DIRECT": {
+      "base": "2026-03-13",
+      "min_dep": "2026-03-13",
+      "max_dep": "2026-04-04",
+      "count": 16
+    },
+    "NVT_CGH_1A": {
+      "base": "2026-03-13",
+      "min_dep": "2026-03-13",
+      "max_dep": "2026-04-04",
+      "count": 16
+    }
+  },
+  "errors_sample": {
+    "ROMA_GRU_FCO_2A1C_DIRECT": {
+      "ctx": {
+        "origin": "GRU",
+        "destination": "FCO",
+        "departure_date": "2026-09-01",
+        "return_date": "2026-09-16",
+        "adults": 2,
+        "children": 1,
+        "direct_only": true
+      },
+      "err": {
+        "errors": [
+          {
+            "code": 38195,
+            "title": "Quota limit exceeded",
+            "detail": "The quota limit is exceeded",
+            "status": 429
+          }
+        ],
+        "_status": 429
+      }
+    }
+  },
+  "offers_sample": {}
+}

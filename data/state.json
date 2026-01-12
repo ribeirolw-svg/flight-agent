@@ -1,11 +1,11 @@
 {
-  "run_id": "20260112T171427Z",
-  "started_utc": "2026-01-12T17:14:27Z",
-  "finished_utc": "2026-01-12T17:29:09Z",
-  "duration_sec": 882,
-  "total_calls": 52,
+  "run_id": "20260112T173350Z",
+  "started_utc": "2026-01-12T17:33:50Z",
+  "finished_utc": "2026-01-12T17:34:41Z",
+  "duration_sec": 51,
+  "total_calls": 42,
   "ok_calls": 0,
-  "err_calls": 52,
+  "err_calls": 6,
   "success_rate": 0.0,
   "offers_saved": 0,
   "amadeus_env": "test",
@@ -13,20 +13,23 @@
   "expanded_ranges": {
     "ROMA_GRU_FCO_2A1C_DIRECT": {
       "min_dep": "2026-09-01",
-      "max_dep": "2026-09-20",
-      "count": 20
+      "max_dep": "2026-09-19",
+      "count": 10,
+      "step_days": 2
     },
     "CWB_CGH_2A1C_DIRECT": {
+      "base": "2026-03-13",
       "min_dep": "2026-03-13",
       "max_dep": "2026-04-04",
-      "count": 16,
-      "base": "2026-03-13"
+      "count": 16
     },
     "NVT_CGH_1A": {
+      "base": "2026-03-13",
       "min_dep": "2026-03-13",
       "max_dep": "2026-04-04",
-      "count": 16,
-      "base": "2026-03-13"
+      "count": 16
     }
-  }
+  },
+  "request_sleep_sec": 0.35,
+  "max_429_before_abort": 6
 }
