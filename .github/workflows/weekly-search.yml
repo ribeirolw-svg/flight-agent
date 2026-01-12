@@ -3,6 +3,7 @@ name: Flight Agent - Update Data
 on:
   workflow_dispatch:
   schedule:
+    # todo dia 09:15 UTC (06:15 Brasil - São Paulo em horário padrão)
     - cron: "15 9 * * *"
 
 permissions:
@@ -20,7 +21,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0  # ✅ necessário pra rebase
+          fetch-depth: 0  # necessário para rebase
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -40,9 +41,9 @@ jobs:
           AMADEUS_CLIENT_ID: ${{ secrets.AMADEUS_CLIENT_ID }}
           AMADEUS_CLIENT_SECRET: ${{ secrets.AMADEUS_CLIENT_SECRET }}
           AMADEUS_ENV: test
-          MAX_RESULTS: "10"
-          REQUEST_SLEEP_SEC: "0.60"
-          MAX_429_BEFORE_ABORT: "3"
+          MAX_RESULTS: "5"
+          REQUEST_SLEEP_SEC: "2.0"
+          MAX_429_BEFORE_ABORT: "1"
 
       - name: Commit & Push artifacts (rebase-safe)
         run: |
@@ -69,7 +70,7 @@ jobs:
 
           git commit -m "Update flight data (auto)"
 
-          # ✅ tenta 3x: rebase e push
+          # tenta 3x: rebase e push (evita o erro fetch first)
           for i in 1 2 3; do
             echo "Push attempt $i/3..."
             git fetch origin main
