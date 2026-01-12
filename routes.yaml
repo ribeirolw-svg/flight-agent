@@ -43,8 +43,8 @@ routes:
       max_stops: 0
 
   # NAVEGANTES — começa em D+60, idem
-  - id: NVT_CGH_1A
-    origin: "CGH"
+  - id: NVT_GRU_1A
+    origin: "GRU"
     destination: "NVT"
     adults: 1
     children: 0
