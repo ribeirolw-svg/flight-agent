@@ -55,6 +55,50 @@ def _to_float(x: Any) -> Optional[float]:
     return None
 
 
+def _extract_carriers(payload: Any) -> Tuple[List[str], Optional[str]]:
+    """
+    Extrai cia(s) aérea(s) a partir do padrão Amadeus:
+      data[].itineraries[].segments[].carrierCode
+    Retorna:
+      - carriers_unique (ordenado)
+      - carrier_main (a mais frequente)
+    """
+    if not isinstance(payload, dict):
+        return [], None
+    data = payload.get("data")
+    if not isinstance(data, list):
+        return [], None
+
+    freq: Dict[str, int] = {}
+
+    for offer in data[:300]:
+        if not isinstance(offer, dict):
+            continue
+        itineraries = offer.get("itineraries")
+        if not isinstance(itineraries, list):
+            continue
+        for it in itineraries:
+            if not isinstance(it, dict):
+                continue
+            segments = it.get("segments")
+            if not isinstance(segments, list):
+                continue
+            for seg in segments:
+                if not isinstance(seg, dict):
+                    continue
+                code = seg.get("carrierCode") or seg.get("carrier") or seg.get("marketingCarrierCode")
+                if isinstance(code, str) and code.strip():
+                    code = code.strip().upper()
+                    freq[code] = freq.get(code, 0) + 1
+
+    if not freq:
+        return [], None
+
+    carriers_unique = sorted(freq.keys())
+    carrier_main = max(freq.items(), key=lambda kv: kv[1])[0]
+    return carriers_unique, carrier_main
+
+
 def _extract_best_price_currency_offerscount(payload: Any) -> Tuple[Optional[float], Optional[str], int]:
     """
     Extrai:
@@ -74,8 +118,7 @@ def _extract_best_price_currency_offerscount(payload: Any) -> Tuple[Optional[flo
     currency: Optional[str] = None
     offers_count = len(data)
 
-    # Limita iteração (segurança/perf)
-    for offer in data[:500]:
+    for offer in data[:300]:
         if not isinstance(offer, dict):
             continue
 
@@ -142,10 +185,7 @@ def run_search_and_store(
     save_raw: bool = False,
 ) -> Dict[str, Any]:
     """
-    Executa a busca e grava SEMPRE no histórico um payload 'achatado' para o dashboard:
-      origin, destination, best_price, offers_count, currency, error, etc.
-
-    Retorna o payload gravado.
+    Grava um payload achatado com campos úteis pro dashboard.
     """
     store = HistoryStore(store_name)
     run_id = uuid.uuid4().hex[:12]
@@ -168,6 +208,7 @@ def run_search_and_store(
         )
 
         best_price, detected_currency, offers_count = _extract_best_price_currency_offerscount(offers_payload)
+        carriers, carrier_main = _extract_carriers(offers_payload)
 
         payload: Dict[str, Any] = {
             "run_id": run_id,
@@ -182,12 +223,14 @@ def run_search_and_store(
             "direct_only": direct_only,
             "offers_count": offers_count,
             "best_price": best_price,
+            "carriers": carriers,            # lista ex: ["AD","G3"]
+            "carrier_main": carrier_main,    # ex: "G3"
             "elapsed_s": round(time.time() - t0, 3),
             "error": None,
         }
 
         if save_raw:
-            payload["raw"] = offers_payload  # opcional (pesa o jsonl)
+            payload["raw"] = offers_payload
 
         store.append("flight_search", payload)
         return payload
@@ -206,6 +249,8 @@ def run_search_and_store(
             "direct_only": direct_only,
             "offers_count": 0,
             "best_price": None,
+            "carriers": [],
+            "carrier_main": None,
             "elapsed_s": round(time.time() - t0, 3),
             "error": str(e),
         }
