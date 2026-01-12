@@ -1,6 +1,6 @@
 {
-  "run_id": "20260112T152857Z",
-  "updated_utc": "2026-01-12T15:30:01Z",
+  "run_id": "20260112T154351Z",
+  "updated_utc": "2026-01-12T15:44:09Z",
   "by_route": {
     "ROMA_GRU_FCO_2A1C_DIRECT": {
       "id": "ROMA_GRU_FCO_2A1C_DIRECT",
@@ -8,11 +8,12 @@
       "destination": "FCO",
       "adults": 2,
       "children": 1,
-      "carrier": "AZ",
-      "stops": 0,
-      "price_total": 18212.82,
-      "departure_date": "2026-09-16",
-      "return_date": "2026-10-01"
+      "carrier": null,
+      "stops": null,
+      "price_total": null,
+      "departure_date": null,
+      "return_date": null,
+      "note": "no_offers_after_filters"
     },
     "CWB_CGH_2A1C_DIRECT": {
       "id": "CWB_CGH_2A1C_DIRECT",
@@ -20,11 +21,12 @@
       "destination": "CWB",
       "adults": 2,
       "children": 1,
-      "carrier": "LA",
-      "stops": 0,
-      "price_total": 10289.88,
-      "departure_date": "2026-01-16",
-      "return_date": "2026-01-19"
+      "carrier": null,
+      "stops": null,
+      "price_total": null,
+      "departure_date": null,
+      "return_date": null,
+      "note": "no_offers_after_filters"
     },
     "NVT_GRU_1A": {
       "id": "NVT_GRU_1A",
