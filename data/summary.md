@@ -1,17 +1,8 @@
 # Flight Agent — Update Summary
 
-- started_utc: `2026-01-12T17:04:06Z`
-- finished_utc: `2026-01-12T17:04:39Z`
-- duration_sec: `33`
-- total_calls: `92`
+- run_id: `20260112T171427Z`
 - ok_calls: `0`
-- err_calls: `92`
-- success_rate: `0.000`
+- err_calls: `52`
 - offers_saved: `0`
-- store: `default`
-- max_results: `10`
-- amadeus_env: `test`
-- immutable_required_origins: `['CGH', 'GRU']`
-- immutable_required_dests: `['CWB', 'FCO', 'NVT']`
-
-[OK] Run completed successfully.
+- total_calls: `52`
+- expanded_ranges: `{"ROMA_GRU_FCO_2A1C_DIRECT": {"min_dep": "2026-09-01", "max_dep": "2026-09-20", "count": 20}, "CWB_CGH_2A1C_DIRECT": {"min_dep": "2026-03-13", "max_dep": "2026-04-04", "count": 16, "base": "2026-03-13"}, "NVT_CGH_1A": {"min_dep": "2026-03-13", "max_dep": "2026-04-04", "count": 16, "base": "2026-03-13"}}`

@@ -1,6 +1,6 @@
 {
-  "run_id": "20260112T170406Z",
-  "updated_utc": "2026-01-12T17:04:39Z",
+  "run_id": "20260112T171427Z",
+  "updated_utc": "2026-01-12T17:29:09Z",
   "by_route": {
     "ROMA_GRU_FCO_2A1C_DIRECT": {
       "id": "ROMA_GRU_FCO_2A1C_DIRECT",
@@ -13,7 +13,7 @@
       "price_total": null,
       "departure_date": null,
       "return_date": null,
-      "note": "no_offers_after_filters"
+      "note": "all_calls_failed"
     },
     "CWB_CGH_2A1C_DIRECT": {
       "id": "CWB_CGH_2A1C_DIRECT",
@@ -26,11 +26,11 @@
       "price_total": null,
       "departure_date": null,
       "return_date": null,
-      "note": "no_offers_after_filters"
+      "note": "all_calls_failed"
     },
-    "NVT_GRU_1A": {
-      "id": "NVT_GRU_1A",
-      "origin": "GRU",
+    "NVT_CGH_1A": {
+      "id": "NVT_CGH_1A",
+      "origin": "CGH",
       "destination": "NVT",
       "adults": 1,
       "children": 0,
@@ -39,7 +39,7 @@
       "price_total": null,
       "departure_date": null,
       "return_date": null,
-      "note": "no_offers_after_filters"
+      "note": "all_calls_failed"
     }
   }
 }
