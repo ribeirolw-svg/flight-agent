@@ -42,16 +42,15 @@ jobs:
           AMADEUS_CLIENT_SECRET: ${{ secrets.AMADEUS_CLIENT_SECRET }}
           AMADEUS_ENV: test
 
-          # performance / safety knobs
+          # SAFE knobs (agressivo contra 429)
           MAX_RESULTS: "5"
-          REQUEST_SLEEP_SEC: "2.5"
+          REQUEST_SLEEP_SEC: "4.0"
           MAX_429_BEFORE_ABORT: "1"
-          COOLDOWN_BEFORE_START_SEC: "12"
-          COOLDOWN_ON_429_SEC: "25"
+          COOLDOWN_BEFORE_START_SEC: "60"
+          COOLDOWN_ON_429_SEC: "120"
 
           # SAFE mode: 1 base route per run (round-robin)
           SAFE_MODE: "1"
-          # Optional: force a specific route id for a manual run
           # FORCE_ROUTE_ID: "ROMA_GRU_FCO_2A1C_DIRECT"
 
       - name: Commit & Push artifacts (rebase-safe)
@@ -80,7 +79,6 @@ jobs:
 
           git commit -m "Update flight data (auto)"
 
-          # 3 tentativas: fetch+rebase+push (evita 'fetch first')
           for i in 1 2 3; do
             echo "Push attempt $i/3..."
             git fetch origin main
