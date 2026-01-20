@@ -1,32 +1,32 @@
 {
-  "run_id": "20260119T100109Z",
-  "started_utc": "2026-01-19T10:01:09Z",
+  "run_id": "20260120T095902Z",
+  "started_utc": "2026-01-20T09:59:02Z",
   "env": "test",
   "max_results": 5,
   "safe_mode": true,
-  "selected_route_id": "CWB_CGH_2A1C_DIRECT",
+  "selected_route_id": "NVT_GRU_1A",
   "request_sleep_sec": 4.0,
   "cooldown_before_start_sec": 60.0,
   "cooldown_on_429_sec": 120.0,
   "max_429_before_abort": 1,
   "expanded_ranges": {
-    "CWB_CGH_2A1C_DIRECT": {
-      "base": "2026-03-20",
-      "min_dep": "2026-03-20",
-      "max_dep": "2026-05-19",
+    "NVT_GRU_1A": {
+      "base": "2026-03-21",
+      "min_dep": "2026-03-21",
+      "max_dep": "2026-05-20",
       "count": 2
     }
   },
   "errors_sample": {
-    "CWB_CGH_2A1C_DIRECT": {
+    "NVT_GRU_1A": {
       "ctx": {
-        "origin": "CGH",
-        "destination": "CWB",
-        "departure_date": "2026-03-20",
+        "origin": "GRU",
+        "destination": "NVT",
+        "departure_date": "2026-03-21",
         "return_date": "2026-03-22",
-        "adults": 2,
-        "children": 1,
-        "direct_only": true
+        "adults": 1,
+        "children": 0,
+        "direct_only": false
       },
       "err": {
         "_status": 429,
@@ -46,5 +46,5 @@
   "status_counts": {
     "429": 1
   },
-  "finished_utc": "2026-01-19T10:04:17Z"
+  "finished_utc": "2026-01-20T10:02:10Z"
 }
