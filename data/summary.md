@@ -1,8 +1,8 @@
 # Flight Agent — Update Summary
 
-- started_utc: `2026-01-20T09:59:02Z`
-- finished_utc: `2026-01-20T10:02:10Z`
-- duration_sec: `188`
+- started_utc: `2026-01-21T09:59:18Z`
+- finished_utc: `2026-01-21T10:02:27Z`
+- duration_sec: `189`
 - total_calls: `1`
 - ok_calls: `0`
 - err_calls: `1`
@@ -12,7 +12,7 @@
 - max_results: `5`
 - amadeus_env: `test`
 - safe_mode: `True`
-- selected_route_id: `NVT_GRU_1A`
+- selected_route_id: `ROMA_GRU_FCO_2A1C_DIRECT`
 - status_counts: `{'429': 1}`
 - note: `RATE_LIMITED (preserved last best_offers/alerts)`
 
