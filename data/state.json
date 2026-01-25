@@ -1,7 +1,7 @@
 {
-  "run_id": "20260124T094307Z",
-  "started_utc": "2026-01-24T09:43:07Z",
-  "finished_utc": "2026-01-24T09:46:16Z",
+  "run_id": "20260125T094552Z",
+  "started_utc": "2026-01-25T09:45:52Z",
+  "finished_utc": "2026-01-25T09:49:01Z",
   "duration_sec": 189,
   "total_calls": 1,
   "ok_calls": 0,
@@ -22,11 +22,11 @@
     "NVT"
   ],
   "expanded_ranges": {
-    "NVT_GRU_1A": {
-      "base": "2026-03-25",
-      "min_dep": "2026-03-25",
-      "max_dep": "2026-05-24",
-      "count": 2
+    "ROMA_GRU_FCO_2A1C_DIRECT": {
+      "min_dep": "2026-09-01",
+      "max_dep": "2026-09-20",
+      "count": 2,
+      "step_days": 4
     }
   },
   "request_sleep_sec": 4.0,
@@ -37,5 +37,5 @@
     "429": 1
   },
   "safe_mode": true,
-  "selected_route_id": "NVT_GRU_1A"
+  "selected_route_id": "ROMA_GRU_FCO_2A1C_DIRECT"
 }
