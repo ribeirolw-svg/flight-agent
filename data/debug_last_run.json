@@ -1,50 +1,30 @@
 {
-  "run_id": "20260131T095510Z",
-  "started_utc": "2026-01-31T09:55:10Z",
+  "run_id": "20260201T095746Z",
+  "started_utc": "2026-02-01T09:57:46Z",
   "env": "test",
   "max_results": 5,
   "safe_mode": true,
-  "selected_route_id": "ROMA_GRU_FCO_2A1C_DIRECT",
+  "selected_route_id": "CWB_CGH_2A1C_DIRECT",
   "request_sleep_sec": 4.0,
   "cooldown_before_start_sec": 60.0,
   "cooldown_on_429_sec": 120.0,
   "max_429_before_abort": 1,
   "expanded_ranges": {
-    "ROMA_GRU_FCO_2A1C_DIRECT": {
-      "min_dep": "2026-09-01",
-      "max_dep": "2026-09-20",
-      "count": 2,
-      "step_days": 4
+    "CWB_CGH_2A1C_DIRECT": {
+      "base": "2026-04-02",
+      "min_dep": "2026-04-02",
+      "max_dep": "2026-06-01",
+      "count": 2
     }
   },
-  "errors_sample": {
-    "ROMA_GRU_FCO_2A1C_DIRECT": {
-      "ctx": {
-        "origin": "GRU",
-        "destination": "FCO",
-        "departure_date": "2026-09-01",
-        "return_date": "2026-09-16",
-        "adults": 2,
-        "children": 1,
-        "direct_only": true
-      },
-      "err": {
-        "_status": 429,
-        "body": "\n                {\n                    \"errors\": [\n                        {\n                            \"code\": 38195,\n                            \"title\": \"Quota limit exceeded\",\n                            \"detail\": \"The quota limit is exceeded\",\n                            \"status\": 429\n                        }\n                    ]\n                }\n            ",
-        "errors": [
-          {
-            "code": 38195,
-            "title": "Quota limit exceeded",
-            "detail": "The quota limit is exceeded",
-            "status": 429
-          }
-        ]
-      }
+  "errors_sample": {},
+  "offers_sample": {
+    "CWB_CGH_2A1C_DIRECT": {
+      "count": 5,
+      "sample_price": 1581.81,
+      "sample_carrier": "G3"
     }
   },
-  "offers_sample": {},
-  "status_counts": {
-    "429": 1
-  },
-  "finished_utc": "2026-01-31T09:58:19Z"
+  "status_counts": {},
+  "finished_utc": "2026-02-01T09:59:01Z"
 }

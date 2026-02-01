@@ -1,20 +1,19 @@
 # Flight Agent — Update Summary
 
-- started_utc: `2026-01-31T09:55:10Z`
-- finished_utc: `2026-01-31T09:58:19Z`
-- duration_sec: `189`
-- total_calls: `1`
-- ok_calls: `0`
-- err_calls: `1`
+- started_utc: `2026-02-01T09:57:46Z`
+- finished_utc: `2026-02-01T09:59:01Z`
+- duration_sec: `75`
+- total_calls: `2`
+- ok_calls: `2`
+- err_calls: `0`
 - empty_ok_calls: `0`
-- success_rate: `0.000`
-- offers_saved: `0`
+- success_rate: `1.000`
+- offers_saved: `10`
 - max_results: `5`
 - amadeus_env: `test`
 - safe_mode: `True`
-- selected_route_id: `ROMA_GRU_FCO_2A1C_DIRECT`
-- status_counts: `{'429': 1}`
-- note: `RATE_LIMITED (preserved last best_offers/alerts)`
+- selected_route_id: `CWB_CGH_2A1C_DIRECT`
+- status_counts: `{}`
 
 ## Sample best offers (preview)
-- (none)
+- CGH->CWB 2026-04-03/2026-04-05 | G3 | BRL 1581.81 | 0 stop(s)
