@@ -1,19 +1,19 @@
 # Flight Agent — Update Summary
 
-- started_utc: `2026-02-06T10:00:26Z`
-- finished_utc: `2026-02-06T10:02:07Z`
-- duration_sec: `101`
+- started_utc: `2026-02-07T09:45:32Z`
+- finished_utc: `2026-02-07T09:46:46Z`
+- duration_sec: `74`
 - total_calls: `2`
 - ok_calls: `2`
 - err_calls: `0`
-- empty_ok_calls: `1`
+- empty_ok_calls: `0`
 - success_rate: `1.000`
-- offers_saved: `4`
+- offers_saved: `10`
 - max_results: `5`
 - amadeus_env: `test`
 - safe_mode: `True`
-- selected_route_id: `ROMA_GRU_FCO_2A1C_DIRECT`
-- status_counts: `{'200_empty': 1}`
+- selected_route_id: `CWB_CGH_2A1C_DIRECT`
+- status_counts: `{}`
 
 ## Sample best offers (preview)
-- GRU->FCO 2026-09-05/2026-09-20 | AZ | BRL 22609.35 | 0 stop(s)
+- CGH->CWB 2026-04-10/2026-04-12 | G3 | BRL 1268.73 | 0 stop(s)
