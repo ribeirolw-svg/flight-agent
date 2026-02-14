@@ -1,19 +1,19 @@
 # Flight Agent — Update Summary
 
-- started_utc: `2026-02-13T10:01:18Z`
-- finished_utc: `2026-02-13T10:02:33Z`
-- duration_sec: `75`
+- started_utc: `2026-02-14T09:45:54Z`
+- finished_utc: `2026-02-14T09:47:08Z`
+- duration_sec: `74`
 - total_calls: `2`
 - ok_calls: `2`
 - err_calls: `0`
 - empty_ok_calls: `0`
 - success_rate: `1.000`
-- offers_saved: `10`
+- offers_saved: `9`
 - max_results: `5`
 - amadeus_env: `test`
 - safe_mode: `True`
-- selected_route_id: `CWB_CGH_2A1C_DIRECT`
+- selected_route_id: `NVT_GRU_1A`
 - status_counts: `{}`
 
 ## Sample best offers (preview)
-- CGH->CWB 2026-04-17/2026-04-19 | LA | BRL 2095.50 | 0 stop(s)
+- GRU->NVT 2026-04-17/2026-04-20 | LA | BRL 1940.27 | 0 stop(s)
