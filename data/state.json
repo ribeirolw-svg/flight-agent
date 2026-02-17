@@ -1,14 +1,14 @@
 {
-  "run_id": "20260216T101040Z",
-  "started_utc": "2026-02-16T10:10:40Z",
-  "finished_utc": "2026-02-16T10:11:53Z",
-  "duration_sec": 73,
+  "run_id": "20260217T100608Z",
+  "started_utc": "2026-02-17T10:06:08Z",
+  "finished_utc": "2026-02-17T10:07:23Z",
+  "duration_sec": 75,
   "total_calls": 2,
   "ok_calls": 2,
   "err_calls": 0,
   "empty_ok_calls": 0,
   "success_rate": 1.0,
-  "offers_saved": 10,
+  "offers_saved": 9,
   "store": "default",
   "max_results": 5,
   "amadeus_env": "test",
@@ -22,10 +22,10 @@
     "NVT"
   ],
   "expanded_ranges": {
-    "CWB_CGH_2A1C_DIRECT": {
-      "base": "2026-04-17",
-      "min_dep": "2026-04-17",
-      "max_dep": "2026-06-16",
+    "NVT_GRU_1A": {
+      "base": "2026-04-18",
+      "min_dep": "2026-04-18",
+      "max_dep": "2026-06-17",
       "count": 2
     }
   },
@@ -35,5 +35,5 @@
   "max_429_before_abort": 1,
   "status_counts": {},
   "safe_mode": true,
-  "selected_route_id": "CWB_CGH_2A1C_DIRECT"
+  "selected_route_id": "NVT_GRU_1A"
 }
