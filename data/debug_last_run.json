@@ -1,30 +1,30 @@
 {
-  "run_id": "20260308T094344Z",
-  "started_utc": "2026-03-08T09:43:44Z",
+  "run_id": "20260309T100611Z",
+  "started_utc": "2026-03-09T10:06:11Z",
   "env": "test",
   "max_results": 5,
   "safe_mode": true,
-  "selected_route_id": "ROMA_GRU_FCO_2A1C_DIRECT",
+  "selected_route_id": "CWB_CGH_2A1C_DIRECT",
   "request_sleep_sec": 4.0,
   "cooldown_before_start_sec": 60.0,
   "cooldown_on_429_sec": 120.0,
   "max_429_before_abort": 1,
   "expanded_ranges": {
-    "ROMA_GRU_FCO_2A1C_DIRECT": {
-      "min_dep": "2026-09-01",
-      "max_dep": "2026-09-20",
-      "count": 2,
-      "step_days": 4
+    "CWB_CGH_2A1C_DIRECT": {
+      "base": "2026-05-08",
+      "min_dep": "2026-05-08",
+      "max_dep": "2026-07-07",
+      "count": 2
     }
   },
   "errors_sample": {},
   "offers_sample": {
-    "ROMA_GRU_FCO_2A1C_DIRECT": {
-      "count": 2,
-      "sample_price": 20171.29,
-      "sample_carrier": "AZ"
+    "CWB_CGH_2A1C_DIRECT": {
+      "count": 5,
+      "sample_price": 1912.92,
+      "sample_carrier": "G3"
     }
   },
   "status_counts": {},
-  "finished_utc": "2026-03-08T09:44:57Z"
+  "finished_utc": "2026-03-09T10:07:24Z"
 }
