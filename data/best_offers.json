@@ -1,6 +1,6 @@
 {
-  "run_id": "20260320T095753Z",
-  "updated_utc": "2026-03-20T09:59:06Z",
+  "run_id": "20260321T094559Z",
+  "updated_utc": "2026-03-21T09:47:09Z",
   "by_route": {
     "ROMA_GRU_FCO_2A1C_DIRECT": {
       "id": "ROMA_GRU_FCO_2A1C_DIRECT",
@@ -8,11 +8,12 @@
       "destination": "FCO",
       "adults": 2,
       "children": 1,
-      "carrier": "AZ",
-      "stops": 0,
-      "price_total": 20052.57,
-      "departure_date": "2026-09-01",
-      "return_date": "2026-09-16"
+      "carrier": null,
+      "stops": null,
+      "price_total": null,
+      "departure_date": null,
+      "return_date": null,
+      "note": "no_offers_after_filters"
     },
     "CWB_CGH_2A1C_DIRECT": {
       "id": "CWB_CGH_2A1C_DIRECT",
