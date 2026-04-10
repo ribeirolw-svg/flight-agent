@@ -1,5 +1,7 @@
 {
   "run_id": "20260409T102107Z",
   "updated_utc": "2026-04-09T10:22:25Z",
-  "alerts": []
+  "alerts": [],
+  "last_attempt_run_id": "20260410T101600Z",
+  "last_attempt_utc": "2026-04-10T10:17:29Z"
 }
