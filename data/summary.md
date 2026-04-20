@@ -1,7 +1,7 @@
 # Flight Agent — Update Summary
 
-- started_utc: `2026-04-19T10:00:18Z`
-- finished_utc: `2026-04-19T10:01:47Z`
+- started_utc: `2026-04-20T10:57:35Z`
+- finished_utc: `2026-04-20T10:59:04Z`
 - duration_sec: `89`
 - total_calls: `2`
 - ok_calls: `0`
@@ -12,7 +12,7 @@
 - max_results: `5`
 - amadeus_env: `test`
 - safe_mode: `True`
-- selected_route_id: `ROMA_GRU_FCO_2A1C_DIRECT`
+- selected_route_id: `CWB_CGH_2A1C_DIRECT`
 - status_counts: `{'500': 2}`
 
 ## Sample best offers (preview)
