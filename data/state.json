@@ -1,8 +1,8 @@
 {
-  "run_id": "20260420T105735Z",
-  "started_utc": "2026-04-20T10:57:35Z",
-  "finished_utc": "2026-04-20T10:59:04Z",
-  "duration_sec": 89,
+  "run_id": "20260421T104323Z",
+  "started_utc": "2026-04-21T10:43:23Z",
+  "finished_utc": "2026-04-21T10:44:51Z",
+  "duration_sec": 88,
   "total_calls": 2,
   "ok_calls": 0,
   "err_calls": 2,
@@ -22,10 +22,10 @@
     "NVT"
   ],
   "expanded_ranges": {
-    "CWB_CGH_2A1C_DIRECT": {
-      "base": "2026-06-19",
-      "min_dep": "2026-06-19",
-      "max_dep": "2026-08-18",
+    "NVT_GRU_1A": {
+      "base": "2026-06-20",
+      "min_dep": "2026-06-20",
+      "max_dep": "2026-08-19",
       "count": 2
     }
   },
@@ -37,5 +37,5 @@
     "500": 2
   },
   "safe_mode": true,
-  "selected_route_id": "CWB_CGH_2A1C_DIRECT"
+  "selected_route_id": "NVT_GRU_1A"
 }
