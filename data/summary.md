@@ -1,8 +1,8 @@
 # Flight Agent — Update Summary
 
-- started_utc: `2026-04-23T10:46:20Z`
-- finished_utc: `2026-04-23T10:47:49Z`
-- duration_sec: `89`
+- started_utc: `2026-04-24T10:43:46Z`
+- finished_utc: `2026-04-24T10:45:14Z`
+- duration_sec: `88`
 - total_calls: `2`
 - ok_calls: `0`
 - err_calls: `2`
@@ -12,7 +12,7 @@
 - max_results: `5`
 - amadeus_env: `test`
 - safe_mode: `True`
-- selected_route_id: `CWB_CGH_2A1C_DIRECT`
+- selected_route_id: `NVT_GRU_1A`
 - status_counts: `{'500': 2}`
 
 ## Sample best offers (preview)
