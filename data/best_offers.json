@@ -1,6 +1,6 @@
 {
-  "run_id": "20260603T140511Z",
-  "updated_utc": "2026-06-03T14:06:44Z",
+  "run_id": "20260604T121656Z",
+  "updated_utc": "2026-06-04T12:18:08Z",
   "by_route": {
     "ROMA_GRU_FCO_2A1C_DIRECT": {
       "id": "ROMA_GRU_FCO_2A1C_DIRECT",
@@ -8,12 +8,11 @@
       "destination": "FCO",
       "adults": 2,
       "children": 1,
-      "carrier": null,
-      "stops": null,
-      "price_total": null,
-      "departure_date": null,
-      "return_date": null,
-      "note": "no_offers_after_filters"
+      "carrier": "LA",
+      "stops": 0,
+      "price_total": 19919.28,
+      "departure_date": "2026-09-01",
+      "return_date": "2026-09-16"
     },
     "CWB_CGH_2A1C_DIRECT": {
       "id": "CWB_CGH_2A1C_DIRECT",
@@ -34,11 +33,12 @@
       "destination": "NVT",
       "adults": 1,
       "children": 0,
-      "carrier": "G3",
-      "stops": 0,
-      "price_total": 926.9,
-      "departure_date": "2026-08-07",
-      "return_date": "2026-08-09"
+      "carrier": null,
+      "stops": null,
+      "price_total": null,
+      "departure_date": null,
+      "return_date": null,
+      "note": "no_offers_after_filters"
     }
   }
 }
