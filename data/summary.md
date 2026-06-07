@@ -1,19 +1,19 @@
 # Flight Agent — Update Summary
 
-- started_utc: `2026-06-06T10:58:51Z`
-- finished_utc: `2026-06-06T11:00:08Z`
-- duration_sec: `77`
+- started_utc: `2026-06-07T11:15:47Z`
+- finished_utc: `2026-06-07T11:16:59Z`
+- duration_sec: `72`
 - total_calls: `2`
 - ok_calls: `2`
 - err_calls: `0`
 - empty_ok_calls: `0`
 - success_rate: `1.000`
-- offers_saved: `10`
+- offers_saved: `8`
 - max_results: `5`
 - amadeus_env: `test`
 - safe_mode: `True`
-- selected_route_id: `NVT_GRU_1A`
+- selected_route_id: `ROMA_GRU_FCO_2A1C_DIRECT`
 - status_counts: `{}`
 
 ## Sample best offers (preview)
-- GRU->NVT 2026-08-07/2026-08-09 | G3 | BRL 770.88 | 0 stop(s)
+- GRU->FCO 2026-09-01/2026-09-16 | LA | BRL 20228.27 | 0 stop(s)
