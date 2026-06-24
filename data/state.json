@@ -1,14 +1,14 @@
 {
-  "run_id": "20260623T121441Z",
-  "started_utc": "2026-06-23T12:14:41Z",
-  "finished_utc": "2026-06-23T12:16:00Z",
-  "duration_sec": 79,
+  "run_id": "20260624T120028Z",
+  "started_utc": "2026-06-24T12:00:28Z",
+  "finished_utc": "2026-06-24T12:02:38Z",
+  "duration_sec": 130,
   "total_calls": 2,
   "ok_calls": 2,
   "err_calls": 0,
-  "empty_ok_calls": 0,
+  "empty_ok_calls": 2,
   "success_rate": 1.0,
-  "offers_saved": 10,
+  "offers_saved": 0,
   "store": "default",
   "max_results": 5,
   "amadeus_env": "test",
@@ -22,10 +22,10 @@
     "NVT"
   ],
   "expanded_ranges": {
-    "CWB_CGH_2A1C_DIRECT": {
-      "base": "2026-08-22",
-      "min_dep": "2026-08-22",
-      "max_dep": "2026-10-21",
+    "NVT_GRU_1A": {
+      "base": "2026-08-23",
+      "min_dep": "2026-08-23",
+      "max_dep": "2026-10-22",
       "count": 2
     }
   },
@@ -33,7 +33,9 @@
   "cooldown_before_start_sec": 60.0,
   "cooldown_on_429_sec": 120.0,
   "max_429_before_abort": 1,
-  "status_counts": {},
+  "status_counts": {
+    "200_empty": 2
+  },
   "safe_mode": true,
-  "selected_route_id": "CWB_CGH_2A1C_DIRECT"
+  "selected_route_id": "NVT_GRU_1A"
 }

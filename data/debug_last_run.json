@@ -1,30 +1,26 @@
 {
-  "run_id": "20260623T121441Z",
-  "started_utc": "2026-06-23T12:14:41Z",
+  "run_id": "20260624T120028Z",
+  "started_utc": "2026-06-24T12:00:28Z",
   "env": "test",
   "max_results": 5,
   "safe_mode": true,
-  "selected_route_id": "CWB_CGH_2A1C_DIRECT",
+  "selected_route_id": "NVT_GRU_1A",
   "request_sleep_sec": 4.0,
   "cooldown_before_start_sec": 60.0,
   "cooldown_on_429_sec": 120.0,
   "max_429_before_abort": 1,
   "expanded_ranges": {
-    "CWB_CGH_2A1C_DIRECT": {
-      "base": "2026-08-22",
-      "min_dep": "2026-08-22",
-      "max_dep": "2026-10-21",
+    "NVT_GRU_1A": {
+      "base": "2026-08-23",
+      "min_dep": "2026-08-23",
+      "max_dep": "2026-10-22",
       "count": 2
     }
   },
   "errors_sample": {},
-  "offers_sample": {
-    "CWB_CGH_2A1C_DIRECT": {
-      "count": 5,
-      "sample_price": 2213.37,
-      "sample_carrier": "G3"
-    }
+  "offers_sample": {},
+  "status_counts": {
+    "200_empty": 2
   },
-  "status_counts": {},
-  "finished_utc": "2026-06-23T12:16:00Z"
+  "finished_utc": "2026-06-24T12:02:38Z"
 }
