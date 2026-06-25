@@ -1,26 +1,30 @@
 {
-  "run_id": "20260624T120028Z",
-  "started_utc": "2026-06-24T12:00:28Z",
+  "run_id": "20260625T114916Z",
+  "started_utc": "2026-06-25T11:49:16Z",
   "env": "test",
   "max_results": 5,
   "safe_mode": true,
-  "selected_route_id": "NVT_GRU_1A",
+  "selected_route_id": "ROMA_GRU_FCO_2A1C_DIRECT",
   "request_sleep_sec": 4.0,
   "cooldown_before_start_sec": 60.0,
   "cooldown_on_429_sec": 120.0,
   "max_429_before_abort": 1,
   "expanded_ranges": {
-    "NVT_GRU_1A": {
-      "base": "2026-08-23",
-      "min_dep": "2026-08-23",
-      "max_dep": "2026-10-22",
-      "count": 2
+    "ROMA_GRU_FCO_2A1C_DIRECT": {
+      "min_dep": "2026-09-01",
+      "max_dep": "2026-09-20",
+      "count": 2,
+      "step_days": 4
     }
   },
   "errors_sample": {},
-  "offers_sample": {},
-  "status_counts": {
-    "200_empty": 2
+  "offers_sample": {
+    "ROMA_GRU_FCO_2A1C_DIRECT": {
+      "count": 3,
+      "sample_price": 20550.84,
+      "sample_carrier": "LA"
+    }
   },
-  "finished_utc": "2026-06-24T12:02:38Z"
+  "status_counts": {},
+  "finished_utc": "2026-06-25T11:50:28Z"
 }
